@@ -2,15 +2,15 @@
 
 PoCADuck is a library for efficiently storing and retrieving vast numbers of point clouds indexed by `uint64` labels. The name stands for:
 - **PoC**: Point Clouds — the core payload
-- **A**: Arrow — using Arrow IPC or Parquet for storage
+- **A**: Arrow — using the Arrow ecosystem for storage (Parquet and perhaps Arrow IPC)
 - **Duck**: DuckDB — for label & block indexing
 
 ## Features
 
-- Efficiently store 3D point clouds for labels within blocks
+- Efficiently ingest 3D point clouds for labels in a blockwise fashion
+- Parallelizable ingestion with worker-specific storage
 - Automatically aggregate point clouds across blocks during retrieval
 - Support for local and cloud storage (S3, GCS, Azure)
-- Parallelizable ingestion with worker-specific storage
 - Efficient queries using DuckDB's indexing capabilities
 
 ## Installation
@@ -129,4 +129,4 @@ PoCADuck follows an architecture with two main components:
 
 ## License
 
-[Insert License Information Here]
+BSD 3-Clause License, see [LICENSE](./LICENSE)

@@ -1,6 +1,6 @@
 ## PoCADuck Overview
 
-PoCADuck is a library for storing vast numbers of point clouds indexed by a `uint64` label in an efficient manner. It efficiently handles ingestion of the point clouds while scanning large 3d label volumes (e.g., 3d neuron segmentation volumes) by allowing writes of points clouds for different labels within each block of the much larger volume. It efficiently handles retrieval of the full point cloud of a label across all written blocks for that label.
+PPoCADuck is a library for efficiently storing and retrieving vast numbers of point clouds indexed by `uint64` labels. It efficiently handles ingestion of the point clouds while scanning large 3d label volumes (e.g., 3d neuron segmentation volumes) by allowing writes of points clouds for different labels within each block of the much larger volume. It efficiently handles retrieval of the full point cloud of a label across all written blocks for that label.
 
 | Element     | Meaning |
 |-------------|--------|
