@@ -149,11 +149,18 @@ class Ingestor:
         
         # Write to parquet file (append if it exists)
         if os.path.exists(file_path) and self.storage_config.storage_type == "local":
-            # Read existing file
-            existing_df = pd.read_parquet(file_path)
+            self.logger.info(f"Appending to existing file {os.path.basename(file_path)}")
+            
+            # We'll use DuckDB to efficiently read the existing file
+            # This is more efficient for large files than pd.read_parquet
+            # A future enhancement could use a native DuckDB append operation
+            existing_df = self.db_connection.execute(f"SELECT * FROM read_parquet('{file_path}')").fetchdf()
+            
             # Append new data
             df = pd.concat([existing_df, df])
-        
+        else:
+            self.logger.info(f"Creating new file {os.path.basename(file_path)}")
+            
         # Write to parquet
         df.to_parquet(file_path, index=False)
         

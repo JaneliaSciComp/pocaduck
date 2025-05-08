@@ -127,6 +127,41 @@ PoCADuck follows an architecture with two main components:
    - Automatically aggregates points across all blocks
    - Efficient filtering and retrieval using DuckDB
 
+## Testing
+
+PoCADuck includes a comprehensive test suite to verify functionality. Here's how to run the tests:
+
+```bash
+# Make sure your environment is activated
+conda activate pocaduck
+
+# Run all tests
+python run_tests.py
+
+# Run a specific test file
+python -m unittest tests/test_local_storage.py
+
+# Run a specific test case
+python -m unittest tests.test_local_storage.TestLocalStorage.test_write_and_query_single_block
+
+# Run tests with more verbose output
+python run_tests.py -v
+```
+
+### Test Data
+
+The repository includes sample test data in `tests/data/` that contains real point cloud data for a variety of labels across multiple blocks. This data is used by the test suite to verify the functionality of the library with realistic data.
+
+### Test Coverage
+
+The test suite covers:
+- Storage configuration (local and cloud storage backends)
+- Point cloud ingestion with single and multiple workers
+- Querying point clouds across blocks
+- Handling multiple labels per block
+- Working with n-dimensional data (not just 3D coordinates)
+- Example code validation
+
 ## License
 
 BSD 3-Clause License, see [LICENSE](./LICENSE)
