@@ -54,7 +54,11 @@ class Ingestor:
         self.worker_id = str(worker_id)
         self.max_points_per_file = max_points_per_file
         self.current_points_count = 0
-        self.current_file_id = str(uuid.uuid4())
+        self.file_counter = 0  # Counter to track the file number for sequential naming
+        
+        # Set up logging
+        import logging
+        self.logger = logging.getLogger(__name__)
         
         # Set up storage paths
         base_path = storage_config.base_path
@@ -105,19 +109,20 @@ class Ingestor:
         points: np.ndarray
     ) -> None:
         """
-        Write 3D point cloud for a label within a block.
+        Write point cloud data for a label within a block.
         
         Args:
             label: The uint64 label identifier.
             block_id: Identifier for the block containing the points.
-            points: Numpy array of shape (N, 3) containing 3D coordinates.
+            points: Numpy array of shape (N, D) containing point data where D is the dimension
+                   of the data (e.g., 3 for just x,y,z coordinates, or more for additional attributes).
             
         Raises:
-            ValueError: If points is not a valid numpy array of 3D coordinates.
+            ValueError: If points is not a valid numpy array.
         """
         # Validate input
-        if not isinstance(points, np.ndarray) or points.ndim != 2 or points.shape[1] != 3:
-            raise ValueError("Points must be a numpy array of shape (N, 3) containing 3D coordinates")
+        if not isinstance(points, np.ndarray) or points.ndim != 2:
+            raise ValueError("Points must be a numpy array of shape (N, D) containing point data")
         
         num_points = points.shape[0]
         if num_points == 0:
@@ -125,19 +130,21 @@ class Ingestor:
         
         # Check if we need to start a new file
         if self.current_points_count + num_points > self.max_points_per_file:
-            self.current_file_id = str(uuid.uuid4())
+            old_counter = self.file_counter
+            self.file_counter += 1  # Increment the file counter for a new file
             self.current_points_count = 0
+            self.logger.info(f"Worker {self.worker_id}: Incrementing file counter from {old_counter} to {self.file_counter}")
         
-        # Get file path for the current file
-        file_path = os.path.join(self.data_dir, f"{self.current_file_id}.parquet")
+        # Get file path for the current file with human-readable name
+        file_path = os.path.join(self.data_dir, f"{self.worker_id}-{self.file_counter}.parquet")
+        self.logger.info(f"Worker {self.worker_id}: Writing to file {os.path.basename(file_path)}, current point count: {self.current_points_count}, adding {num_points} points")
         
         # Create DataFrame from points
+        # Ensure label is handled as a BIGINT to avoid type inconsistencies
         df = pd.DataFrame({
-            'label': label,
+            'label': pd.Series([label] * len(points), dtype='int64'),
             'block_id': block_id,
-            'x': points[:, 0],
-            'y': points[:, 1],
-            'z': points[:, 2]
+            'data': list(points)  # Store each row of points as a list in the 'data' column
         })
         
         # Write to parquet file (append if it exists)

@@ -53,8 +53,18 @@ def main():
                         # Generate random number of points
                         num_points = np.random.randint(100, 1000)
                         
-                        # Generate random 3D points
-                        points = np.random.rand(num_points, 3) * 100
+                        # Generate random 3D points with supervoxel IDs
+                        # First 3 columns are x, y, z coordinates, 4th column is supervoxel ID
+                        coordinates = np.random.randint(0, 1000, size=(num_points, 3))
+                        # Generate large random supervoxel IDs
+                        supervoxels = np.random.randint(
+                            low=1000000000, 
+                            high=9000000000, 
+                            size=(num_points, 1), 
+                            dtype=np.int64
+                        )
+                        # Combine coordinates and supervoxels
+                        points = np.hstack((coordinates, supervoxels))
                         
                         # Write the points
                         ingestor.write(
@@ -99,7 +109,13 @@ def main():
             # Get all points
             points = query.get_points(test_label)
             print(f"Retrieved {points.shape[0]} points for label {test_label}")
-            print(f"First few points: \n{points[:5]}")
+            print(f"Point data shape: {points.shape} (each point has {points.shape[1]} dimensions)")
+            print(f"First few points (x, y, z, supervoxel_id): \n{points[:5]}")
+            
+            # Display coordiantes and supervoxel IDs separately for clarity
+            if points.shape[0] > 0 and points.shape[1] >= 4:
+                print(f"\nCoordinates (x, y, z):\n{points[:5, :3]}")
+                print(f"\nSupervoxel IDs:\n{points[:5, 3]}")
         
         # Close the query connection
         query.close()

@@ -74,12 +74,26 @@ def demonstrate_ingestion(config, worker_id="worker1"):
         worker_id=worker_id
     )
     
-    # Generate some sample data
+    # Generate some sample data with supervoxel IDs
     label = 12345
     block_id = "block_1"
-    points = np.random.rand(100, 3) * 100
     
-    print(f"Writing {points.shape[0]} points for label {label} in block {block_id}")
+    # Generate coordinates (first 3 columns)
+    coordinates = np.random.randint(0, 10000, size=(100, 3))
+    
+    # Generate supervoxel IDs (4th column)
+    supervoxels = np.random.randint(
+        low=10000000000, 
+        high=90000000000, 
+        size=(100, 1), 
+        dtype=np.int64
+    )
+    
+    # Combine coordinates and supervoxels
+    points = np.hstack((coordinates, supervoxels))
+    
+    print(f"Writing {points.shape[0]} points with {points.shape[1]} dimensions for label {label} in block {block_id}")
+    print(f"Sample point (x, y, z, supervoxel_id): {points[0]}")
     # Note: This would actually write to cloud storage if credentials were valid
     # ingestor.write(label=label, block_id=block_id, points=points)
     

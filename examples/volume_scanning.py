@@ -51,10 +51,22 @@ class MockVolumeBlock:
         # Find coordinates where the volume equals the label
         coords = np.where(self.volume == label)
         if len(coords[0]) == 0:
-            return np.zeros((0, 3), dtype=np.float32)
+            return np.zeros((0, 4), dtype=np.int64)  # Return empty array with 4 columns
         
         # Stack the coordinates into an (N, 3) array
-        points = np.vstack(coords).T.astype(np.float32)
+        coords_array = np.vstack(coords).T.astype(np.int64)
+        
+        # Generate supervoxel IDs for each point (simulating additional data)
+        num_points = coords_array.shape[0]
+        supervoxel_ids = np.random.randint(
+            low=10000000000, 
+            high=90000000000, 
+            size=(num_points, 1), 
+            dtype=np.int64
+        )
+        
+        # Combine coordinates and supervoxel IDs
+        points = np.hstack((coords_array, supervoxel_ids))
         return points
 
 
@@ -163,11 +175,19 @@ def query_results(storage_path):
             points = query.get_points(label)
             print(f"  Retrieved {points.shape[0]} points")
             
-            # Calculate bounding box
+            # Calculate bounding box of coordinates and show supervoxel data
             if points.shape[0] > 0:
-                min_coords = np.min(points, axis=0)
-                max_coords = np.max(points, axis=0)
-                print(f"  Bounding box: min={min_coords}, max={max_coords}")
+                # Get coordinate dimensions (first 3 columns)
+                coords = points[:, :3]
+                min_coords = np.min(coords, axis=0)
+                max_coords = np.max(coords, axis=0)
+                print(f"  Bounding box (x,y,z): min={min_coords}, max={max_coords}")
+                
+                # Display supervoxel information
+                supervoxels = points[:, 3]
+                unique_supervoxels = np.unique(supervoxels)
+                print(f"  Contains {len(unique_supervoxels)} unique supervoxel IDs")
+                print(f"  Sample supervoxel IDs: {unique_supervoxels[:5] if len(unique_supervoxels) > 5 else unique_supervoxels}")
     
     # Close the query connection
     query.close()

@@ -116,13 +116,14 @@ class Query:
     
     def get_points(self, label: int) -> np.ndarray:
         """
-        Get all 3D points for a specific label.
+        Get all point data for a specific label.
         
         Args:
             label: The label to query for.
             
         Returns:
-            Numpy array of shape (N, 3) containing all 3D coordinates for the label.
+            Numpy array containing all point data for the label. The shape is (N, D) where
+            N is the number of points and D is the dimension of the point data.
         """
         # Convert numpy.uint64 to int if necessary
         if isinstance(label, np.integer):
@@ -138,11 +139,12 @@ class Query:
         
         if not file_paths:
             # No data for this label
-            return np.zeros((0, 3), dtype=np.float32)
+            return np.array([], dtype=np.int64)
         
         # Use DuckDB to efficiently read and filter the parquet files
+        # Simplify the query to just get the data for the requested label
         query = f"""
-            SELECT x, y, z
+            SELECT data
             FROM parquet_scan([{','.join(f"'{path}'" for path in file_paths)}])
             WHERE label = {label}
         """
@@ -150,8 +152,22 @@ class Query:
         # Execute query and get results as Pandas DataFrame
         df = self.db_connection.execute(query).fetchdf()
         
-        # Convert to numpy array
-        points = df[['x', 'y', 'z']].to_numpy(dtype=np.float32)
+        # Convert list-based data column back to numpy arrays and stack them
+        if len(df) == 0:
+            return np.array([], dtype=np.int64)
+        
+        # Convert the list-based data back to a numpy array
+        points_list = df['data'].tolist()
+        
+        # Stack the points and remove duplicates
+        if points_list:
+            # Stack all points
+            points = np.vstack(points_list).astype(np.int64)
+            
+            # Remove duplicates to ensure we only have unique points
+            points = np.unique(points, axis=0)
+        else:
+            return np.array([], dtype=np.int64)
         
         return points
     
