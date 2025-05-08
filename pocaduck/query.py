@@ -82,14 +82,16 @@ class Query:
             label: The label to query for.
             
         Returns:
-            List of block IDs that contain the label.
+            List of unique block IDs that contain the label.
         """
         # Convert numpy.uint64 to int if necessary
         if isinstance(label, np.integer):
             label = int(label)
             
+        # With our new schema, we may have multiple entries for the same label-block combination
+        # due to splitting large point clouds, so we need to select distinct block_ids
         result = self.db_connection.execute(
-            "SELECT block_id FROM point_cloud_index WHERE label = ?",
+            "SELECT DISTINCT block_id FROM point_cloud_index WHERE label = ?",
             [label]
         ).fetchall()
         return [r[0] for r in result]

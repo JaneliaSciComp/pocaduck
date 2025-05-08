@@ -90,13 +90,15 @@ class Ingestor:
             con.execute(f"SET {key}='{value}'")
         
         # Create the index table
+        # Note: We no longer have a PRIMARY KEY constraint on (label, block_id)
+        # because we need to allow multiple entries when points for a label-block
+        # are split across multiple files
         con.execute("""
             CREATE TABLE IF NOT EXISTS point_cloud_index (
                 label UBIGINT,
                 block_id VARCHAR,
                 file_path VARCHAR,
-                point_count UBIGINT,
-                PRIMARY KEY (label, block_id)
+                point_count UBIGINT
             )
         """)
         
@@ -128,50 +130,88 @@ class Ingestor:
         if num_points == 0:
             return  # Skip empty point clouds
         
-        # Check if we need to start a new file
-        if self.current_points_count + num_points > self.max_points_per_file:
-            old_counter = self.file_counter
-            self.file_counter += 1  # Increment the file counter for a new file
-            self.current_points_count = 0
-            self.logger.info(f"Worker {self.worker_id}: Incrementing file counter from {old_counter} to {self.file_counter}")
+        # Handle points in batches respecting max_points_per_file limit
+        remaining_points = points
+        points_written = 0
         
-        # Get file path for the current file with human-readable name
-        file_path = os.path.join(self.data_dir, f"{self.worker_id}-{self.file_counter}.parquet")
-        self.logger.info(f"Worker {self.worker_id}: Writing to file {os.path.basename(file_path)}, current point count: {self.current_points_count}, adding {num_points} points")
-        
-        # Create DataFrame from points
-        # Ensure label is handled as a BIGINT to avoid type inconsistencies
-        df = pd.DataFrame({
-            'label': pd.Series([label] * len(points), dtype='int64'),
-            'block_id': block_id,
-            'data': list(points)  # Store each row of points as a list in the 'data' column
-        })
-        
-        # Write to parquet file (append if it exists)
-        if os.path.exists(file_path) and self.storage_config.storage_type == "local":
-            self.logger.info(f"Appending to existing file {os.path.basename(file_path)}")
+        while points_written < num_points:
+            # Calculate how many points we can add to the current file
+            space_in_current_file = self.max_points_per_file - self.current_points_count
+            points_to_write = min(space_in_current_file, len(remaining_points))
             
-            # We'll use DuckDB to efficiently read the existing file
-            # This is more efficient for large files than pd.read_parquet
-            # A future enhancement could use a native DuckDB append operation
-            existing_df = self.db_connection.execute(f"SELECT * FROM read_parquet('{file_path}')").fetchdf()
+            if points_to_write <= 0:
+                # Current file is full, increment counter and start a new file
+                old_counter = self.file_counter
+                self.file_counter += 1
+                self.current_points_count = 0
+                self.logger.info(f"Worker {self.worker_id}: Incrementing file counter from {old_counter} to {self.file_counter}")
+                continue  # Recalculate space in the new file
             
-            # Append new data
-            df = pd.concat([existing_df, df])
-        else:
-            self.logger.info(f"Creating new file {os.path.basename(file_path)}")
+            # Select the batch of points to write to this file
+            batch = remaining_points[:points_to_write]
             
-        # Write to parquet
-        df.to_parquet(file_path, index=False)
-        
-        # Update index in DuckDB
-        self.db_connection.execute("""
-            INSERT OR REPLACE INTO point_cloud_index (label, block_id, file_path, point_count)
-            VALUES (?, ?, ?, ?)
-        """, [label, block_id, file_path, num_points])
-        
-        # Update current points count
-        self.current_points_count += num_points
+            # Get file path for the current file with human-readable name
+            file_path = os.path.join(self.data_dir, f"{self.worker_id}-{self.file_counter}.parquet")
+            self.logger.info(f"Worker {self.worker_id}: Writing to file {os.path.basename(file_path)}, "
+                            f"current point count: {self.current_points_count}, "
+                            f"adding {len(batch)} points "
+                            f"(batch {points_written+1}-{points_written+len(batch)} of {num_points})")
+            
+            # Create DataFrame from batch of points
+            # Ensure label is handled as a BIGINT to avoid type inconsistencies
+            df = pd.DataFrame({
+                'label': pd.Series([label] * len(batch), dtype='int64'),
+                'block_id': block_id,
+                'data': list(batch)  # Store each row of points as a list in the 'data' column
+            })
+            
+            # Write to parquet file (append if it exists)
+            if os.path.exists(file_path) and self.storage_config.storage_type == "local":
+                self.logger.info(f"Appending to existing file {os.path.basename(file_path)}")
+                
+                # We'll use DuckDB to efficiently read the existing file
+                # This is more efficient for large files than pd.read_parquet
+                existing_df = self.db_connection.execute(f"SELECT * FROM read_parquet('{file_path}')").fetchdf()
+                
+                # Append new data
+                df = pd.concat([existing_df, df])
+            else:
+                self.logger.info(f"Creating new file {os.path.basename(file_path)}")
+                
+            # Write to parquet
+            df.to_parquet(file_path, index=False)
+            
+            # When we split files, we need a different approach to index management.
+            # If this is the first chunk of points for this label-block combination,
+            # we'll create a new index entry with the file path.
+            # For subsequent chunks, we'll just update the point count
+            # without overwriting the file path, since we need to keep a reference
+            # to all files with these points.
+            
+            # Check if this is a new entry for this label-block combination
+            existing_entry = self.db_connection.execute("""
+                SELECT file_path, point_count FROM point_cloud_index 
+                WHERE label = ? AND block_id = ?
+            """, [label, block_id]).fetchone()
+            
+            if existing_entry:
+                # This label-block combo exists in the index
+                # Add a new entry with this file path
+                self.db_connection.execute("""
+                    INSERT INTO point_cloud_index (label, block_id, file_path, point_count)
+                    VALUES (?, ?, ?, ?)
+                """, [label, block_id, file_path, len(batch)])
+            else:
+                # This is a new label-block combination
+                self.db_connection.execute("""
+                    INSERT INTO point_cloud_index (label, block_id, file_path, point_count)
+                    VALUES (?, ?, ?, ?)
+                """, [label, block_id, file_path, len(batch)])
+            
+            # Update tracking variables
+            self.current_points_count += len(batch)
+            points_written += len(batch)
+            remaining_points = remaining_points[points_to_write:]
     
     def finalize(self) -> None:
         """
@@ -220,13 +260,15 @@ class Ingestor:
             con.execute(f"SET {key}='{value}'")
         
         # Create the consolidated index table
+        # Note: We no longer have a PRIMARY KEY constraint on (label, block_id)
+        # because we need to allow multiple entries when points for a label-block
+        # are split across multiple files
         con.execute("""
             CREATE TABLE IF NOT EXISTS point_cloud_index (
                 label UBIGINT,
                 block_id VARCHAR,
                 file_path VARCHAR,
-                point_count UBIGINT,
-                PRIMARY KEY (label, block_id)
+                point_count UBIGINT
             )
         """)
         
@@ -251,7 +293,7 @@ class Ingestor:
                 flat_data = [val for row in worker_data for val in row]
                 
                 con.execute(f"""
-                    INSERT OR IGNORE INTO point_cloud_index (label, block_id, file_path, point_count)
+                    INSERT INTO point_cloud_index (label, block_id, file_path, point_count)
                     VALUES {placeholders}
                 """, flat_data)
         
