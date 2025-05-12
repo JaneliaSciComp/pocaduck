@@ -58,9 +58,10 @@ class TestRealData(unittest.TestCase):
         # Create an ingestor for this worker with a very small max_points_per_file
         # to ensure multiple parquet files are created
         ingestor = Ingestor(
-            storage_config=self.storage_config, 
+            storage_config=self.storage_config,
             worker_id=f"worker_{worker_id}",
-            max_points_per_file=5  # Very small value to force creation of multiple files
+            max_points_per_file=5,  # Very small value to force creation of multiple files
+            verbose=True  # Enable verbose logging for tests
         )
         
         # Process each block
