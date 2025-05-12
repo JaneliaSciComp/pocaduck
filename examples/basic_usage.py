@@ -37,9 +37,10 @@ def main():
             
             # Create an ingestor for this worker
             ingestor = Ingestor(
-                storage_config=config, 
+                storage_config=config,
                 worker_id=worker_id,
-                max_points_per_file=100000
+                max_points_per_file=100000,
+                verbose=True  # Enable verbose logging for demonstrations
             )
             
             # Process blocks assigned to this worker

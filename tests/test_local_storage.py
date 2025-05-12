@@ -39,7 +39,7 @@ class TestLocalStorage(unittest.TestCase):
     
     def test_ingestor_creation(self):
         """Test creating an Ingestor instance."""
-        ingestor = Ingestor(storage_config=self.storage_config, worker_id="test_worker")
+        ingestor = Ingestor(storage_config=self.storage_config, worker_id="test_worker", verbose=True)
         
         # Check that directories were created
         worker_dir = os.path.join(self.temp_dir, "worker_test_worker")
@@ -58,7 +58,7 @@ class TestLocalStorage(unittest.TestCase):
         points = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]])
         
         # Create an ingestor and write the points
-        ingestor = Ingestor(storage_config=self.storage_config, worker_id="test_worker")
+        ingestor = Ingestor(storage_config=self.storage_config, worker_id="test_worker", verbose=True)
         ingestor.write(label=label, block_id=block_id, points=points)
         ingestor.finalize()
         
@@ -103,8 +103,9 @@ class TestLocalStorage(unittest.TestCase):
         # Create ingestors and write points
         for worker_id in range(num_workers):
             ingestor = Ingestor(
-                storage_config=self.storage_config, 
-                worker_id=f"worker_{worker_id}"
+                storage_config=self.storage_config,
+                worker_id=f"worker_{worker_id}",
+                verbose=True
             )
             
             block_id = f"block_{worker_id}"
@@ -193,7 +194,7 @@ class TestLocalStorage(unittest.TestCase):
         ], dtype=np.int64)
         
         # Create an ingestor and write the points
-        ingestor = Ingestor(storage_config=self.storage_config, worker_id="test_worker")
+        ingestor = Ingestor(storage_config=self.storage_config, worker_id="test_worker", verbose=True)
         ingestor.write(label=label, block_id=block_id, points=points)
         ingestor.finalize()
         

@@ -43,6 +43,7 @@ class Ingestor:
         storage_config: StorageConfig,
         worker_id: Union[str, int],
         max_points_per_file: int = 10_000_000,
+        verbose: bool = False,
     ):
         """
         Initialize an Ingestor instance.
@@ -51,6 +52,8 @@ class Ingestor:
             storage_config: Configuration for storage backend.
             worker_id: Unique identifier for the worker.
             max_points_per_file: Maximum number of points to store in a single parquet file.
+            verbose: Whether to output detailed logging information during operations.
+                    Default is False for reduced output in production environments.
         """
         self.storage_config = storage_config
         self.worker_id = str(worker_id)
@@ -59,6 +62,7 @@ class Ingestor:
         self.file_counter = 0  # Counter to track the file number for sequential naming
         self.current_file_path = None  # Path to the current parquet file
         self.current_file_df = None    # DataFrame cache for the current file
+        self.verbose = verbose         # Whether to output detailed logging
 
         # Set up logging
         import logging
@@ -113,7 +117,8 @@ class Ingestor:
         Flush the current DataFrame to a parquet file.
         """
         if self.current_file_df is not None and len(self.current_file_df) > 0:
-            self.logger.info(f"Worker {self.worker_id}: Flushing {len(self.current_file_df)} rows to {os.path.basename(self.current_file_path)}")
+            if self.verbose:
+                self.logger.info(f"Worker {self.worker_id}: Flushing {len(self.current_file_df)} rows to {os.path.basename(self.current_file_path)}")
 
             # Write DataFrame to parquet
             self.current_file_df.to_parquet(self.current_file_path, index=False)
@@ -164,7 +169,8 @@ class Ingestor:
                 self.current_points_count = 0
                 self.current_file_path = None
                 self.current_file_df = None
-                self.logger.info(f"Worker {self.worker_id}: Incrementing file counter from {old_counter} to {self.file_counter}")
+                if self.verbose:
+                    self.logger.info(f"Worker {self.worker_id}: Incrementing file counter from {old_counter} to {self.file_counter}")
                 continue  # Recalculate space in the new file
 
             # Select the batch of points to write to this file
@@ -173,10 +179,11 @@ class Ingestor:
             # Get or create the file path for the current file
             if self.current_file_path is None:
                 self.current_file_path = os.path.join(self.data_dir, f"{self.worker_id}-{self.file_counter}.parquet")
-                self.logger.info(f"Worker {self.worker_id}: Using file {os.path.basename(self.current_file_path)}, "
-                                f"current point count: {self.current_points_count}, "
-                                f"adding {len(batch)} points "
-                                f"(batch {points_written+1}-{points_written+len(batch)} of {num_points})")
+                if self.verbose:
+                    self.logger.info(f"Worker {self.worker_id}: Using file {os.path.basename(self.current_file_path)}, "
+                                    f"current point count: {self.current_points_count}, "
+                                    f"adding {len(batch)} points "
+                                    f"(batch {points_written+1}-{points_written+len(batch)} of {num_points})")
 
             # Create DataFrame from batch of points
             # Ensure label is handled as a BIGINT to avoid type inconsistencies
@@ -189,7 +196,8 @@ class Ingestor:
             # Check if this is an existing file that needs to be loaded first
             if self.current_file_df is None:
                 if os.path.exists(self.current_file_path) and self.storage_config.storage_type == "local":
-                    self.logger.info(f"Loading existing file {os.path.basename(self.current_file_path)}")
+                    if self.verbose:
+                        self.logger.info(f"Loading existing file {os.path.basename(self.current_file_path)}")
 
                     # Use DuckDB to efficiently read the existing file
                     self.current_file_df = self.db_connection.execute(
