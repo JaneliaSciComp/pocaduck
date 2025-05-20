@@ -58,7 +58,9 @@ gcs_config = StorageConfig(
 
 ### Point Cloud Ingestion
 
-Create an Ingestor for each worker:
+Each worker is given a non-overlapping sets of blocks and create
+an Ingestor with common storage configuration, e.g., if local storage
+is used, the workers share a common data directory.
 
 ```python
 from pocaduck import Ingestor
@@ -75,10 +77,17 @@ points = np.random.rand(1000, 3) * 100  # Random 3D points
 # Write the points
 ingestor.write(label=label, block_id=block_id, points=points)
 
-# Finalize when done
-ingestor.finalize()
+# The worker continues writing points across blocks...
 
-# After all workers have finalized, consolidate indexes
+# Then finalize when finished writing for that worker.
+ingestor.finalize()
+```
+
+When all workers have finished writing and called `ingestor.finalize()`,
+we consolidate the workers' indices into one index.
+
+```python
+# storage config should be identical to one used by workers.
 Ingestor.consolidate_indexes(config)
 ```
 
