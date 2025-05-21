@@ -29,9 +29,16 @@ class Query:
     performs read operations. This allows access to databases where the user
     only has read permissions.
 
+    Optimization Support:
+    This class automatically detects and uses optimized data if available in the
+    {base_path}/optimized directory. Optimized data can be created using the
+    optimize_point_cloud.py script, which reorganizes point clouds by label for
+    significantly faster retrieval.
+
     Attributes:
         storage_config: Configuration for storage backend.
         db_connection: Connection to the DuckDB database for indexing.
+        using_optimized_data: Boolean indicating if optimized data is being used.
     """
     
     def __init__(
@@ -55,13 +62,20 @@ class Query:
         """
         self.storage_config = storage_config
         self.cache_size = cache_size
+        self.using_optimized_data = False
 
         # Set threads to system CPU count if not provided
         self.threads = threads if threads is not None else (os.cpu_count() or DEFAULT_THREAD_COUNT)
 
         # Set the index path
         if index_path is None:
-            self.index_path = os.path.join(storage_config.base_path, "unified_index.db")
+            # Check for optimized data
+            has_optimized, optimized_index, _ = self._check_for_optimized_data()
+            if has_optimized:
+                self.index_path = optimized_index
+                self.using_optimized_data = True
+            else:
+                self.index_path = os.path.join(storage_config.base_path, "unified_index.db")
         else:
             self.index_path = index_path
 
@@ -71,6 +85,28 @@ class Query:
         # Initialize point cloud cache for frequently queried labels
         self._points_cache = {}  # Maps label to point cloud data
     
+    def _check_for_optimized_data(self) -> Tuple[bool, Optional[str], Optional[str]]:
+        """
+        Check if optimized data is available for this storage configuration.
+
+        Returns:
+            Tuple containing:
+            - Boolean indicating if optimized data is available
+            - Path to the optimized index (or None if not available)
+            - Path to the optimized directory (or None if not available)
+        """
+        # Check if optimized directory exists
+        optimized_dir = os.path.join(self.storage_config.base_path, "optimized")
+        if not os.path.isdir(optimized_dir):
+            return False, None, None
+
+        # Check if optimized index exists
+        optimized_index = os.path.join(optimized_dir, "optimized_index.db")
+        if not os.path.exists(optimized_index):
+            return False, None, None
+
+        return True, optimized_index, optimized_dir
+
     def _initialize_db_connection(self) -> duckdb.DuckDBPyConnection:
         """
         Initialize connection to DuckDB for querying with optimized settings
@@ -148,11 +184,13 @@ class Query:
     def get_points(self, label: int, use_cache: bool = True) -> np.ndarray:
         """
         Get all point data for a specific label.
-        
+
+        This method automatically uses optimized data if available, for better performance.
+
         Args:
             label: The label to query for.
             use_cache: Whether to use the in-memory point cloud cache (if enabled).
-            
+
         Returns:
             Numpy array containing all point data for the label. The shape is (N, D) where
             N is the number of points and D is the dimension of the point data.
@@ -160,65 +198,134 @@ class Query:
         # Convert numpy.uint64 to int if necessary
         if isinstance(label, np.integer):
             label = int(label)
-            
+
         # Check if the points are in the cache
         if use_cache and self.cache_size > 0 and label in self._points_cache:
             # Move this label to the end of the cache to mark it as most recently used
             points = self._points_cache.pop(label)
             self._points_cache[label] = points
             return points
-            
-        # Find all files containing this label
+
+        # Use optimized data if available, otherwise fall back to original method
+        if self.using_optimized_data:
+            return self._get_points_optimized(label, use_cache)
+        else:
+            return self._get_points_original(label, use_cache)
+
+    def _get_points_optimized(self, label: int, use_cache: bool = True) -> np.ndarray:
+        """
+        Get points using the optimized data structure.
+
+        Args:
+            label: The label to query for.
+            use_cache: Whether to use the in-memory point cloud cache (if enabled).
+
+        Returns:
+            Numpy array containing all point data for the label.
+        """
+        # Get file info from the optimized index
         file_info = self.db_connection.execute(
-            "SELECT DISTINCT file_path FROM point_cloud_index WHERE label = ?",
+            "SELECT file_path FROM point_cloud_index WHERE label = ?",
             [label]
         ).fetchall()
-        
-        file_paths = [info[0] for info in file_info]
-        
-        if not file_paths:
+
+        if not file_info:
             # No data for this label
             empty_result = np.array([], dtype=np.int64)
             if use_cache and self.cache_size > 0:
                 self._update_cache(label, empty_result)
             return empty_result
-            
-        # Use the most reliable query to get the point data
+
+        file_path = file_info[0][0]
+
+        # Single query to get the data - much more efficient
         query = f"""
             SELECT data
-            FROM parquet_scan([{','.join(f"'{path}'" for path in file_paths)}])
+            FROM parquet_scan('{file_path}')
             WHERE label = {label}
         """
-        
+
         # Execute query and get results as Pandas DataFrame
         df = self.db_connection.execute(query).fetchdf()
-        
+
         # Handle empty result
         if len(df) == 0:
             empty_result = np.array([], dtype=np.int64)
             if use_cache and self.cache_size > 0:
                 self._update_cache(label, empty_result)
             return empty_result
-        
+
+        # Get the points (should just be one row with all points)
+        points = df['data'].iloc[0]
+
+        # Cache the result if enabled
+        if use_cache and self.cache_size > 0:
+            self._update_cache(label, points)
+
+        return points
+
+    def _get_points_original(self, label: int, use_cache: bool = True) -> np.ndarray:
+        """
+        Original implementation of get_points, used as fallback when optimized data is not available.
+
+        Args:
+            label: The label to query for.
+            use_cache: Whether to use the in-memory point cloud cache (if enabled).
+
+        Returns:
+            Numpy array containing all point data for the label.
+        """
+        # Find all files containing this label
+        file_info = self.db_connection.execute(
+            "SELECT DISTINCT file_path FROM point_cloud_index WHERE label = ?",
+            [label]
+        ).fetchall()
+
+        file_paths = [info[0] for info in file_info]
+
+        if not file_paths:
+            # No data for this label
+            empty_result = np.array([], dtype=np.int64)
+            if use_cache and self.cache_size > 0:
+                self._update_cache(label, empty_result)
+            return empty_result
+
+        # Use the most reliable query to get the point data
+        query = f"""
+            SELECT data
+            FROM parquet_scan([{','.join(f"'{path}'" for path in file_paths)}])
+            WHERE label = {label}
+        """
+
+        # Execute query and get results as Pandas DataFrame
+        df = self.db_connection.execute(query).fetchdf()
+
+        # Handle empty result
+        if len(df) == 0:
+            empty_result = np.array([], dtype=np.int64)
+            if use_cache and self.cache_size > 0:
+                self._update_cache(label, empty_result)
+            return empty_result
+
         # Convert list-based data column back to numpy arrays and stack them
         points_list = df['data'].tolist()
-        
+
         if not points_list:
             empty_result = np.array([], dtype=np.int64)
             if use_cache and self.cache_size > 0:
                 self._update_cache(label, empty_result)
             return empty_result
-            
+
         # Stack the points
         points = np.vstack(points_list).astype(np.int64)
-        
+
         # Remove duplicates to ensure we only have unique points
         points = np.unique(points, axis=0)
-        
+
         # Cache the result if enabled
         if use_cache and self.cache_size > 0:
             self._update_cache(label, points)
-            
+
         return points
         
     def _update_cache(self, label: int, points: np.ndarray) -> None:
