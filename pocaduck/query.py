@@ -21,10 +21,14 @@ DEFAULT_THREAD_COUNT = 8
 class Query:
     """
     Handles querying of point clouds across blocks.
-    
+
     The Query class provides methods to retrieve 3D point clouds for labels,
     automatically aggregating the points across all blocks that contain the label.
-    
+
+    Note: This class always opens the database in read-only mode since it only
+    performs read operations. This allows access to databases where the user
+    only has read permissions.
+
     Attributes:
         storage_config: Configuration for storage backend.
         db_connection: Connection to the DuckDB database for indexing.
@@ -75,8 +79,9 @@ class Query:
         Returns:
             DuckDB connection.
         """
-        # Create a connection to DuckDB
-        con = duckdb.connect(self.index_path)
+        # Always use read-only mode since Query class only performs read operations
+        # This allows access to databases where the user only has read permissions
+        con = duckdb.connect(self.index_path, read_only=True)
 
         # Apply storage configuration
         duckdb_config = self.storage_config.get_duckdb_config()
