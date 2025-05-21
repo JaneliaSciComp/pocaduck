@@ -125,7 +125,7 @@ query.close()
 
 PoCADuck follows an architecture with two main components:
 
-1. **Ingestion**: 
+1. **Ingestion**:
    - Multiple workers process blocks independently
    - Each worker writes point clouds for labels within blocks
    - Workers maintain local indexes for fast lookup
@@ -135,6 +135,56 @@ PoCADuck follows an architecture with two main components:
    - Unified index allows fast lookup by label
    - Automatically aggregates points across all blocks
    - Efficient filtering and retrieval using DuckDB
+
+## Performance Optimization
+
+For large datasets where labels are scattered across many worker files, PoCADuck provides an optimization pipeline that reorganizes data by label for significantly faster retrieval.
+
+### How It Works
+
+The optimization process:
+1. Reads point data from the original structure
+2. Reorganizes points by label into optimized parquet files
+3. Creates a new optimized index for efficient label-based lookups
+
+After optimization, the Query class automatically detects and uses the optimized data structure with no code changes required.
+
+### Running the Optimization Pipeline
+
+The optimization pipeline supports parallel processing to handle large datasets efficiently:
+
+```bash
+# 1. Shard the labels for parallel processing (e.g., 8 workers)
+python optimize_point_cloud.py --action shard --base-path /path/to/data --num-shards 8
+
+# 2. Run optimization workers in parallel (can be on separate machines)
+# Worker 1
+python optimize_point_cloud.py --action optimize --base-path /path/to/data \
+  --labels-file labels_shard_0.txt --worker-id worker1 --threads 16
+
+# Worker 2
+python optimize_point_cloud.py --action optimize --base-path /path/to/data \
+  --labels-file labels_shard_1.txt --worker-id worker2 --threads 16
+
+# ... and so on for all shards
+
+# 3. Consolidate the results into a unified optimized index
+python optimize_point_cloud.py --action consolidate --base-path /path/to/data
+```
+
+### Key Options
+
+- `--target-file-size`: Target size for optimized parquet files (default: 500MB)
+- `--batch-size`: Number of labels to process in a batch for memory management (default: 100)
+- `--threads`: Number of threads to use for DuckDB processing
+- `--quiet`: Suppress progress output
+
+### Benefits
+
+- Significantly faster retrieval for label-based queries (often 10-100x speedup)
+- Reduced disk I/O by consolidating each label's data
+- Automatic deduplication of points
+- Transparent integration - no code changes needed for existing applications
 
 ## Testing
 
