@@ -8,6 +8,13 @@ significantly improving query performance.
 
 The optimizer can be run in parallel on different subsets of labels, with a final
 consolidation step to merge the results.
+
+The optimization results are stored in the following structure:
+- {base_path}/optimized/                        # Main optimization directory
+  - optimized_index.db                          # Consolidated optimized index
+  - optimize_{worker_id}/                       # Worker-specific directories
+    - metadata.json                             # Worker metadata
+    - optimized_{uuid}.parquet                  # Optimized parquet files
 """
 
 import os
@@ -59,8 +66,9 @@ def optimize_point_clouds(
     if target_path is None:
         target_path = os.path.join(storage_config.base_path, "optimized")
     
-    # Create optimized directory and worker subdirectory
-    worker_dir = os.path.join(target_path, f"worker_{worker_id}")
+    # Create optimized directory and optimizer worker subdirectory
+    # Use 'optimize_' prefix to distinguish from ingestion workers
+    worker_dir = os.path.join(target_path, f"optimize_{worker_id}")
     os.makedirs(worker_dir, exist_ok=True)
     
     # Path for worker metadata
@@ -283,9 +291,9 @@ def consolidate_optimized_indices(
         print(f"Consolidating optimized indices from {target_path}")
         print(f"Target index: {target_index_path}")
     
-    # Find all worker directories
-    worker_dirs = [d for d in os.listdir(target_path) 
-                   if os.path.isdir(os.path.join(target_path, d)) and d.startswith("worker_")]
+    # Find all optimizer worker directories
+    worker_dirs = [d for d in os.listdir(target_path)
+                   if os.path.isdir(os.path.join(target_path, d)) and d.startswith("optimize_")]
     
     if not worker_dirs:
         if verbose:
@@ -336,7 +344,7 @@ def consolidate_optimized_indices(
             with open(metadata_path, 'r') as f:
                 metadata = json.load(f)
             
-            worker_id = metadata.get("worker_id", worker_dir.replace("worker_", ""))
+            worker_id = metadata.get("worker_id", worker_dir.replace("optimize_", ""))
             processed_labels = metadata.get("processed_labels", {})
             
             if verbose:
