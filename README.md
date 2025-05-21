@@ -147,6 +147,21 @@ The optimization process:
 2. Reorganizes points by label into optimized parquet files
 3. Creates a new optimized index for efficient label-based lookups
 
+The optimized data is stored in a standard directory structure:
+```
+/base_path/
+├── unified_index.db              # Original index
+├── worker_1/                     # Original ingestion worker dirs
+├── worker_2/
+└── optimized/                    # Optimization directory
+    ├── optimized_index.db        # Consolidated optimized index
+    ├── optimize_worker1/         # Optimizer worker directories
+    │   ├── metadata.json         # Worker metadata
+    │   ├── optimized_*.parquet   # Optimized parquet files
+    └── optimize_worker2/
+        └── ...
+```
+
 After optimization, the Query class automatically detects and uses the optimized data structure with no code changes required.
 
 ### Running the Optimization Pipeline
