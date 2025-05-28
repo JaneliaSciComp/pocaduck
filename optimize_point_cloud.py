@@ -449,8 +449,6 @@ def main():
     """Command-line entry point for the optimization script."""
     parser = argparse.ArgumentParser(description="PoCADuck Point Cloud Optimizer")
     
-    parser.add_argument("--base-path", type=str, required=True,
-                        help="Base path for storage configuration")
     parser.add_argument("--source-index", type=str,
                         help="Path to source index (if different from base_path/unified_index.db)")
     parser.add_argument("--target-path", type=str,
@@ -483,22 +481,8 @@ def main():
     parser.add_argument("--labels-file", type=str,
                         help="File containing labels to process, one per line (default: all labels)")
     
-    # Add cloud storage related arguments
-    parser.add_argument("--storage-type", type=str, default="local",
-                        choices=["local", "s3", "gcs", "azure"],
-                        help="Storage backend type (default: local)")
-    parser.add_argument("--region", type=str,
-                        help="Cloud region (for S3, GCS)")
-    parser.add_argument("--endpoint", type=str,
-                        help="Custom endpoint URL (for S3)")
-    parser.add_argument("--access-key", type=str,
-                        help="Access key ID (for S3, Azure)")
-    parser.add_argument("--secret-key", type=str,
-                        help="Secret access key (for S3, Azure)")
-    parser.add_argument("--token", type=str,
-                        help="Session token (for S3)")
-    parser.add_argument("--container", type=str,
-                        help="Container name (for Azure)")
+    # Add storage configuration arguments
+    StorageConfig.add_storage_args(parser)
     
     # Verbosity control
     parser.add_argument("--quiet", action="store_true",
@@ -506,27 +490,8 @@ def main():
     
     args = parser.parse_args()
     
-    # Configure storage
-    storage_kwargs = {
-        "base_path": args.base_path,
-        "storage_type": args.storage_type
-    }
-    
-    # Add cloud-specific parameters if provided
-    if args.region:
-        storage_kwargs["region"] = args.region
-    if args.endpoint:
-        storage_kwargs["endpoint_url"] = args.endpoint
-    if args.access_key:
-        storage_kwargs["access_key_id"] = args.access_key
-    if args.secret_key:
-        storage_kwargs["secret_access_key"] = args.secret_key
-    if args.token:
-        storage_kwargs["session_token"] = args.token
-    if args.container:
-        storage_kwargs["container"] = args.container
-    
-    storage_config = StorageConfig(**storage_kwargs)
+    # Configure storage using the new class method
+    storage_config = StorageConfig.from_args(args)
     
     # Get source index path
     source_index_path = args.source_index
