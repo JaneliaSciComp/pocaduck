@@ -379,13 +379,15 @@ def consolidate_optimized_indices(
                     # Group by label to get point counts
                     label_counts = df.groupby('label').size().reset_index(name='point_count')
                     
-                    # Insert each label's data into the consolidated index
-                    for _, row in label_counts.iterrows():
-                        target_con.execute("""
-                            INSERT INTO point_cloud_index 
-                            (label, file_path, point_count) 
-                            VALUES (?, ?, ?)
-                        """, [int(row['label']), file_path, int(row['point_count'])])
+                    # Add file_path column and prepare for bulk insert
+                    label_counts['file_path'] = file_path
+                    
+                    # Reorder columns to match table schema: label, file_path, point_count
+                    insert_df = label_counts[['label', 'file_path', 'point_count']].copy()
+                    
+                    # Bulk insert using DuckDB's DataFrame integration
+                    target_con.register('temp_insert_data', insert_df)
+                    target_con.execute("INSERT INTO point_cloud_index SELECT * FROM temp_insert_data")
                     
                     total_labels += len(label_counts)
                     
