@@ -297,8 +297,8 @@ def consolidate_optimized_indices(
         target_index_path = os.path.join(target_path, "optimized_index.db")
     
     if verbose:
-        print(f"Consolidating optimized indices from {target_path}")
-        print(f"Target index: {target_index_path}")
+        print(f"Consolidating optimized indices from {target_path}", flush=True)
+        print(f"Target index: {target_index_path}", flush=True)
     
     # Find all optimizer worker directories
     worker_dirs = [d for d in os.listdir(target_path)
@@ -306,16 +306,16 @@ def consolidate_optimized_indices(
     
     if not worker_dirs:
         if verbose:
-            print("No worker directories found. Nothing to consolidate.")
+            print("No worker directories found. Nothing to consolidate.", flush=True)
         return
     
     if verbose:
-        print(f"Found {len(worker_dirs)} worker directories")
+        print(f"Found {len(worker_dirs)} worker directories", flush=True)
     
     # Create/connect to target index
     if os.path.exists(target_index_path):
         if verbose:
-            print(f"Removing existing index at {target_index_path}")
+            print(f"Removing existing index at {target_index_path}", flush=True)
         os.remove(target_index_path)
     
     target_con = duckdb.connect(target_index_path)
@@ -346,7 +346,7 @@ def consolidate_optimized_indices(
         
         if not os.path.exists(metadata_path):
             if verbose:
-                print(f"Skipping {worker_dir}: No metadata file found")
+                print(f"Skipping {worker_dir}: No metadata file found", flush=True)
             continue
         
         try:
@@ -359,13 +359,13 @@ def consolidate_optimized_indices(
             if verbose:
                 worker_stats = metadata.get("stats", {})
                 labels_count = worker_stats.get("total_labels", 0)
-                print(f"Processing {worker_dir} (worker_id: {worker_id}): {labels_count} labels in {len(files_info)} files")
+                print(f"Processing {worker_dir} (worker_id: {worker_id}): {labels_count} labels in {len(files_info)} files", flush=True)
             
             # For each file, read the actual parquet data to build the index
             for file_path, file_info in files_info.items():
                 if not os.path.exists(file_path):
                     if verbose:
-                        print(f"Warning: File {file_path} not found, skipping")
+                        print(f"Warning: File {file_path} not found, skipping", flush=True)
                     continue
                 
                 try:
@@ -389,22 +389,22 @@ def consolidate_optimized_indices(
                     
                 except Exception as e:
                     if verbose:
-                        print(f"Error processing file {file_path}: {str(e)}")
+                        print(f"Error processing file {file_path}: {str(e)}", flush=True)
             
         except Exception as e:
             if verbose:
-                print(f"Error processing {worker_dir}: {str(e)}")
+                print(f"Error processing {worker_dir}: {str(e)}", flush=True)
     
     # Create indexes for performance
     if verbose:
-        print("Creating index on label column...")
+        print("Creating index on label column...", flush=True)
     target_con.execute("CREATE INDEX idx_label ON point_cloud_index(label)")
     
     # Commit and close connection
     target_con.close()
     
     if verbose:
-        print(f"Consolidation complete! Total labels in optimized index: {total_labels}")
+        print(f"Consolidation complete! Total labels in optimized index: {total_labels}", flush=True)
 
 def shard_labels(
     storage_config: StorageConfig,
