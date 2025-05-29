@@ -161,15 +161,17 @@ def optimize_point_clouds(
                     print(f"No point data returned for batch, skipping...")
                 continue
             
-            # Group by label and process each label's points
-            batch_progress = tqdm(batch_labels, desc="Labels", unit="label") if verbose else batch_labels
+            # Process each label's points (no tqdm to avoid polluting cluster logs)
+            labels_processed_in_batch = 0
             
-            for label in batch_progress:
+            for label in batch_labels:
                 # Filter data for this specific label
                 label_df = df[df['label'] == label]
                 
                 if len(label_df) == 0:
                     continue
+                
+                labels_processed_in_batch += 1
                 
                 # Convert individual point rows to a 2D array
                 points_list = label_df['data'].tolist()
@@ -229,8 +231,16 @@ def optimize_point_clouds(
             
             batch_elapsed = time.time() - batch_start_time
             if verbose and batch_elapsed > 0:
-                labels_per_sec = len(batch_labels) / batch_elapsed
-                print(f"Batch completed in {batch_elapsed:.2f}s ({labels_per_sec:.1f} labels/sec)")
+                # Current batch rate
+                batch_labels_per_sec = labels_processed_in_batch / batch_elapsed
+                
+                # Cumulative rate over all work done so far
+                cumulative_elapsed = time.time() - start_time
+                cumulative_labels_per_sec = processed_count / cumulative_elapsed if cumulative_elapsed > 0 else 0
+                
+                print(f"Worker {worker_id} - Batch {i//batch_size + 1}/{(len(labels) + batch_size - 1)//batch_size}: "
+                      f"{labels_processed_in_batch}/{len(batch_labels)} labels in {batch_elapsed:.2f}s "
+                      f"(batch: {batch_labels_per_sec:.1f} labels/s, cumulative: {cumulative_labels_per_sec:.1f} labels/s)")
                 
         except Exception as e:
             if verbose:
