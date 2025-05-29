@@ -74,20 +74,6 @@ def optimize_point_clouds(
     # Path for worker metadata
     worker_metadata_path = os.path.join(worker_dir, "metadata.json")
     
-    # Check if this worker has already done some work
-    processed_labels = set()
-    if os.path.exists(worker_metadata_path):
-        try:
-            with open(worker_metadata_path, 'r') as f:
-                metadata = json.load(f)
-                processed_info = metadata.get("processed_labels", {})
-                processed_labels = set(int(label) for label in processed_info.keys())
-                if verbose:
-                    print(f"Found {len(processed_labels)} previously processed labels for worker {worker_id}")
-        except Exception as e:
-            if verbose:
-                print(f"Error reading metadata file: {e}")
-    
     # Connect to source index
     src_con = duckdb.connect(source_index_path, read_only=True)
     
@@ -113,29 +99,18 @@ def optimize_point_clouds(
         if verbose:
             print(f"Processing {len(labels)} specified labels")
     
-    # Filter out already processed labels
-    if processed_labels:
-        original_count = len(labels)
-        labels = [label for label in labels if label not in processed_labels]
-        if verbose:
-            print(f"Filtered out {original_count - len(labels)} already processed labels")
-    
-    # Load or initialize worker metadata
+    # Initialize worker metadata - minimal tracking
     worker_metadata = {
         "worker_id": worker_id,
-        "processed_labels": {},
-        "files": []
+        "files": {},  # Map file paths to summary info only
+        "stats": {
+            "total_labels": 0,
+            "total_points": 0,
+            "files_created": 0
+        }
     }
     
-    if os.path.exists(worker_metadata_path):
-        try:
-            with open(worker_metadata_path, 'r') as f:
-                worker_metadata = json.load(f)
-        except Exception as e:
-            if verbose:
-                print(f"Error loading existing metadata, starting fresh: {e}")
-    
-    # Process labels in batches to manage memory
+    # Process labels in batches to manage memory and improve query performance
     current_file_path = None
     current_file_size = 0
     processed_count = 0
@@ -147,48 +122,63 @@ def optimize_point_clouds(
     
     for i in range(0, len(labels), batch_size):
         batch_labels = labels[i:i+batch_size]
+        batch_start_time = time.time()
+        
         if verbose:
             print(f"Processing batch {i//batch_size + 1}/{(len(labels) + batch_size - 1)//batch_size}: "
                   f"{len(batch_labels)} labels")
         
-        batch_progress = tqdm(batch_labels, desc="Labels", unit="label") if verbose else batch_labels
-        for label in batch_progress:
-            # Get file paths containing this label
-            file_info = src_con.execute(
-                "SELECT file_path FROM point_cloud_index WHERE label = ?",
-                [label]
-            ).fetchall()
+        try:
+            # Get all file paths for this batch of labels in one query
+            labels_str = ','.join(str(label) for label in batch_labels)
+            file_info = src_con.execute(f"""
+                SELECT DISTINCT file_path 
+                FROM point_cloud_index 
+                WHERE label IN ({labels_str})
+            """).fetchall()
+            
+            if not file_info:
+                if verbose:
+                    print(f"No data found for batch, skipping...")
+                continue
             
             file_paths = [info[0] for info in file_info]
             
-            if not file_paths:
-                if verbose:
-                    print(f"Skipping label {label}: no data found")
-                continue
-            
-            # Use DuckDB to efficiently read the point data
+            # Read all data for the batch in one large query
             query = f"""
-                SELECT data
+                SELECT label, data
                 FROM parquet_scan([{','.join(f"'{path}'" for path in file_paths)}])
-                WHERE label = {label}
+                WHERE label IN ({labels_str})
+                ORDER BY label
             """
             
-            try:
-                # Get points as DataFrame
-                df = src_con.execute(query).fetchdf()
+            # Get all points for the batch
+            df = src_con.execute(query).fetchdf()
+            
+            if len(df) == 0:
+                if verbose:
+                    print(f"No point data returned for batch, skipping...")
+                continue
+            
+            # Group by label and process each label's points
+            batch_progress = tqdm(batch_labels, desc="Labels", unit="label") if verbose else batch_labels
+            
+            for label in batch_progress:
+                # Filter data for this specific label
+                label_df = df[df['label'] == label]
                 
-                if len(df) == 0:
-                    if verbose:
-                        print(f"Skipping label {label}: no point data returned")
+                if len(label_df) == 0:
                     continue
                 
-                # Stack points and remove duplicates
-                points_list = df['data'].tolist()
-                points = np.vstack(points_list).astype(np.int64)
-                points = np.unique(points, axis=0)
+                # Convert individual point rows to a 2D array
+                points_list = label_df['data'].tolist()
+                points = np.array(points_list, dtype=np.int64)
+                
+                # Remove duplicates if there are any
+                if len(points) > 0:
+                    points = np.unique(points, axis=0)
                 
                 # Calculate size of this label's points
-                # Rough estimate: points array size + overhead
                 point_size_bytes = points.nbytes + 1000  # Add overhead
                 
                 # If adding this would exceed target file size, create a new file
@@ -198,14 +188,17 @@ def optimize_point_clouds(
                     current_file_path = os.path.join(worker_dir, f"optimized_{file_id}.parquet")
                     current_file_size = 0
                     
-                    # Add file to metadata
-                    if current_file_path not in worker_metadata["files"]:
-                        worker_metadata["files"].append(current_file_path)
+                    # Add file to metadata with minimal info
+                    worker_metadata["files"][current_file_path] = {
+                        "labels_count": 0,
+                        "points_count": 0
+                    }
+                    worker_metadata["stats"]["files_created"] += 1
                 
-                # Prepare data for writing
+                # Prepare data for writing - store individual point rows like original format
                 point_df = pd.DataFrame({
-                    'label': label,
-                    'data': [points]  # Store as a single array
+                    'label': [label] * len(points),
+                    'data': list(points)  # Store each point row individually
                 })
                 
                 # Write to file
@@ -213,31 +206,37 @@ def optimize_point_clouds(
                     # New file
                     point_df.to_parquet(current_file_path, index=False)
                 else:
-                    # Append to existing file
-                    point_df.to_parquet(current_file_path, index=False, append=True)
+                    # Append to existing file by reading and concatenating
+                    existing_df = pd.read_parquet(current_file_path)
+                    combined_df = pd.concat([existing_df, point_df], ignore_index=True)
+                    combined_df.to_parquet(current_file_path, index=False)
                 
                 # Update size tracking
                 new_size = os.path.getsize(current_file_path)
-                point_size_actual = new_size - current_file_size
                 current_file_size = new_size
                 
-                # Add label info to metadata
-                worker_metadata["processed_labels"][str(label)] = {
-                    "file_path": current_file_path,
-                    "point_count": int(len(points))
-                }
-                
-                # Save metadata periodically (every 10 labels)
-                if processed_count % 10 == 0:
-                    with open(worker_metadata_path, 'w') as f:
-                        json.dump(worker_metadata, f, indent=2)
+                # Update metadata with aggregated stats only
+                worker_metadata["files"][current_file_path]["labels_count"] += 1
+                worker_metadata["files"][current_file_path]["points_count"] += len(points)
+                worker_metadata["stats"]["total_labels"] += 1
+                worker_metadata["stats"]["total_points"] += len(points)
                 
                 processed_count += 1
                 total_points += len(points)
+            
+            # Save metadata periodically (every batch to track progress)
+            with open(worker_metadata_path, 'w') as f:
+                json.dump(worker_metadata, f, indent=2)
+            
+            batch_elapsed = time.time() - batch_start_time
+            if verbose and batch_elapsed > 0:
+                labels_per_sec = len(batch_labels) / batch_elapsed
+                print(f"Batch completed in {batch_elapsed:.2f}s ({labels_per_sec:.1f} labels/sec)")
                 
-            except Exception as e:
-                if verbose:
-                    print(f"Error processing label {label}: {str(e)}")
+        except Exception as e:
+            if verbose:
+                print(f"Error processing batch starting at label index {i}: {str(e)}")
+            # Continue with next batch on error
     
     # Save final metadata
     with open(worker_metadata_path, 'w') as f:
@@ -345,24 +344,40 @@ def consolidate_optimized_indices(
                 metadata = json.load(f)
             
             worker_id = metadata.get("worker_id", worker_dir.replace("optimize_", ""))
-            processed_labels = metadata.get("processed_labels", {})
+            files_info = metadata.get("files", {})
             
             if verbose:
-                print(f"Processing {worker_dir} (worker_id: {worker_id}): {len(processed_labels)} labels")
+                worker_stats = metadata.get("stats", {})
+                labels_count = worker_stats.get("total_labels", 0)
+                print(f"Processing {worker_dir} (worker_id: {worker_id}): {labels_count} labels in {len(files_info)} files")
             
-            # Insert worker's labels into the consolidated index
-            for label_str, info in processed_labels.items():
-                label = int(label_str)
-                file_path = info["file_path"]
-                point_count = info["point_count"]
+            # For each file, read the actual parquet data to build the index
+            for file_path, file_info in files_info.items():
+                if not os.path.exists(file_path):
+                    if verbose:
+                        print(f"Warning: File {file_path} not found, skipping")
+                    continue
                 
-                target_con.execute("""
-                    INSERT INTO point_cloud_index 
-                    (label, file_path, point_count) 
-                    VALUES (?, ?, ?)
-                """, [label, file_path, point_count])
-            
-            total_labels += len(processed_labels)
+                try:
+                    # Read the parquet file to get actual label data
+                    df = pd.read_parquet(file_path)
+                    
+                    # Group by label to get point counts
+                    label_counts = df.groupby('label').size().reset_index(name='point_count')
+                    
+                    # Insert each label's data into the consolidated index
+                    for _, row in label_counts.iterrows():
+                        target_con.execute("""
+                            INSERT INTO point_cloud_index 
+                            (label, file_path, point_count) 
+                            VALUES (?, ?, ?)
+                        """, [int(row['label']), file_path, int(row['point_count'])])
+                    
+                    total_labels += len(label_counts)
+                    
+                except Exception as e:
+                    if verbose:
+                        print(f"Error processing file {file_path}: {str(e)}")
             
         except Exception as e:
             if verbose:

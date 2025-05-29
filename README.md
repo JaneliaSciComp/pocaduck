@@ -187,6 +187,8 @@ python optimize_point_cloud.py --action optimize --base-path /path/to/data \
 python optimize_point_cloud.py --action consolidate --base-path /path/to/data
 ```
 
+**Note**: If interrupted, workers should be restarted from the beginning with a fresh worker directory.
+
 ### Key Options
 
 - `--target-file-size`: Target size for optimized parquet files (default: 500MB)
