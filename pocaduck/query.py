@@ -143,15 +143,22 @@ class Query:
         """
         Get all blocks that contain a specific label.
         
+        Note: For optimized data, this returns an empty list since 
+        optimized data consolidates all blocks for each label.
+        
         Args:
             label: The label to query for.
             
         Returns:
-            List of unique block IDs that contain the label.
+            List of unique block IDs that contain the label, or empty list for optimized data.
         """
         # Convert numpy.uint64 to int if necessary
         if isinstance(label, np.integer):
             label = int(label)
+        
+        # If using optimized data, block information is not available
+        if self.using_optimized_data:
+            return []
             
         # With our new schema, we may have multiple entries for the same label-block combination
         # due to splitting large point clouds, so we need to select distinct block_ids
@@ -225,7 +232,7 @@ class Query:
         """
         # Get file info from the optimized index
         file_info = self.db_connection.execute(
-            "SELECT file_path FROM point_cloud_index WHERE label = ?",
+            "SELECT DISTINCT file_path FROM point_cloud_index WHERE label = ?",
             [label]
         ).fetchall()
 
@@ -236,12 +243,13 @@ class Query:
                 self._update_cache(label, empty_result)
             return empty_result
 
-        file_path = file_info[0][0]
-
-        # Single query to get the data - much more efficient
+        # Handle multiple files for a single label
+        file_paths = [info[0] for info in file_info]
+        
+        # Query all files that contain this label
         query = f"""
             SELECT data
-            FROM parquet_scan('{file_path}')
+            FROM parquet_scan([{','.join(f"'{path}'" for path in file_paths)}])
             WHERE label = {label}
         """
 
@@ -255,8 +263,9 @@ class Query:
                 self._update_cache(label, empty_result)
             return empty_result
 
-        # Get the points (should just be one row with all points)
-        points = df['data'].iloc[0]
+        # Get the points - convert list of point rows to 2D numpy array
+        points_list = df['data'].tolist()
+        points = np.array(points_list, dtype=np.int64)
 
         # Cache the result if enabled
         if use_cache and self.cache_size > 0:
