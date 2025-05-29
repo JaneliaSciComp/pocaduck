@@ -112,7 +112,7 @@ def optimize_point_clouds(
     
     # Process labels in batches to manage memory and improve query performance
     current_file_path = None
-    current_file_df = None  # In-memory DataFrame cache
+    current_file_data = []  # List accumulator for efficient appending
     current_file_size = 0
     processed_count = 0
     total_points = 0
@@ -184,15 +184,17 @@ def optimize_point_clouds(
                 
                 # If adding this would exceed target file size, flush current file and create a new one
                 if current_file_path is None or current_file_size + point_size_bytes > target_file_size:
-                    # Flush current file if it exists
-                    if current_file_df is not None and len(current_file_df) > 0:
-                        current_file_df.to_parquet(current_file_path, index=False)
+                    # Flush current file if it has data
+                    if current_file_data:
+                        # Convert list to DataFrame and write to parquet
+                        df_to_write = pd.DataFrame(current_file_data)
+                        df_to_write.to_parquet(current_file_path, index=False)
                         current_file_size = os.path.getsize(current_file_path)
                     
                     # Create new file
                     file_id = str(uuid.uuid4())
                     current_file_path = os.path.join(worker_dir, f"optimized_{file_id}.parquet")
-                    current_file_df = pd.DataFrame(columns=['label', 'data'])  # Initialize empty DataFrame
+                    current_file_data = []  # Reset to empty list
                     current_file_size = 0
                     
                     # Add file to metadata with minimal info
@@ -202,14 +204,12 @@ def optimize_point_clouds(
                     }
                     worker_metadata["stats"]["files_created"] += 1
                 
-                # Prepare data for writing - store individual point rows like original format
-                point_df = pd.DataFrame({
-                    'label': [label] * len(points),
-                    'data': list(points)  # Store each point row individually
-                })
-                
-                # Add to in-memory DataFrame cache
-                current_file_df = pd.concat([current_file_df, point_df], ignore_index=True)
+                # Add data to list accumulator - much more efficient than DataFrame concat
+                for point_row in points:
+                    current_file_data.append({
+                        'label': label,
+                        'data': point_row
+                    })
                 
                 # Update size tracking (estimate based on DataFrame memory usage)
                 current_file_size += point_size_bytes
@@ -238,8 +238,9 @@ def optimize_point_clouds(
             # Continue with next batch on error
     
     # Flush final file if it has data
-    if current_file_df is not None and len(current_file_df) > 0:
-        current_file_df.to_parquet(current_file_path, index=False)
+    if current_file_data:
+        df_to_write = pd.DataFrame(current_file_data)
+        df_to_write.to_parquet(current_file_path, index=False)
     
     # Save final metadata
     with open(worker_metadata_path, 'w') as f:
