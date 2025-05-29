@@ -119,15 +119,11 @@ def optimize_point_clouds(
     start_time = time.time()
     
     if verbose:
-        print(f"Processing {len(labels)} labels in batches of {batch_size}...")
+        print(f"Processing {len(labels)} labels in batches of {batch_size}...", flush=True)
     
     for i in range(0, len(labels), batch_size):
         batch_labels = labels[i:i+batch_size]
         batch_start_time = time.time()
-        
-        if verbose:
-            print(f"Processing batch {i//batch_size + 1}/{(len(labels) + batch_size - 1)//batch_size}: "
-                  f"{len(batch_labels)} labels")
         
         try:
             # Get all file paths for this batch of labels in one query
@@ -238,9 +234,9 @@ def optimize_point_clouds(
                 cumulative_elapsed = time.time() - start_time
                 cumulative_labels_per_sec = processed_count / cumulative_elapsed if cumulative_elapsed > 0 else 0
                 
-                print(f"Worker {worker_id} - Batch {i//batch_size + 1}/{(len(labels) + batch_size - 1)//batch_size}: "
+                print(f"{worker_id}: Batch {i//batch_size + 1}/{(len(labels) + batch_size - 1)//batch_size}: "
                       f"{labels_processed_in_batch}/{len(batch_labels)} labels in {batch_elapsed:.2f}s "
-                      f"(batch: {batch_labels_per_sec:.1f} labels/s, cumulative: {cumulative_labels_per_sec:.1f} labels/s)")
+                      f"(batch: {batch_labels_per_sec:.1f} labels/s, cumulative: {cumulative_labels_per_sec:.1f} labels/s)", flush=True)
                 
         except Exception as e:
             if verbose:
