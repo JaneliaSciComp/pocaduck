@@ -463,7 +463,7 @@ def shard_labels(
     # Write shards to files
     shard_files = []
     for i, shard in enumerate(shards):
-        shard_file = os.path.join(output_dir, f"labels_shard_{i}.txt")
+        shard_file = os.path.join(output_dir, f"labels_shard_{i+1}.txt")
         with open(shard_file, 'w') as f:
             f.write("\n".join(str(label) for label in shard))
         
