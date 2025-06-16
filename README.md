@@ -169,13 +169,19 @@ After optimization, the Query class automatically detects and uses the optimized
 The optimization pipeline supports parallel processing to handle large datasets efficiently:
 
 ```bash
-# 1. Shard the labels for parallel processing (e.g., 8 workers)
+# 1. Shard the labels for parallel processing (e.g., 8 workers).
+#    This will create `labels_shard_*.txt` files that partition the labels
+#    into shard files `labels_shard_1.txt` to `labels_shard_<N>.txt` 
+#    where <N> is num-shards.
 python optimize_point_cloud.py --action shard --base-path /path/to/data --num-shards 8
 
 # 2. Run optimization workers in parallel (can be on separate machines)
+#    Typically you'd use a bash script or a cluster feature (like job arrays)
+#    to easily launch each worker as an array of jobs.
+
 # Worker 1
 python optimize_point_cloud.py --action optimize --base-path /path/to/data \
-  --labels-file labels_shard_0.txt --worker-id worker1 --threads 16
+  --labels-file labels_shard_1.txt --worker-id worker1 --threads 16
 
 # Worker 2
 python optimize_point_cloud.py --action optimize --base-path /path/to/data \
