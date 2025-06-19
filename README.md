@@ -209,6 +209,57 @@ python optimize_point_cloud.py --action consolidate --base-path /path/to/data
 - Automatic deduplication of points
 - Transparent integration - no code changes needed for existing applications
 
+## Performance Analysis and Debugging
+
+PoCADuck provides timing functionality to help analyze and debug slow queries. This is particularly useful for understanding where time is spent during point cloud retrieval and identifying potential performance bottlenecks.
+
+### Using Timing Features
+
+All query methods support an optional `timing` parameter that returns detailed performance metrics:
+
+```python
+from pocaduck import Query
+
+query = Query(storage_config=config)
+
+# Get timing information for any query method
+points, timing_info = query.get_points(label=12345, timing=True)
+count, timing_info = query.get_point_count(label=12345, timing=True)  
+blocks, timing_info = query.get_blocks_for_label(label=12345, timing=True)
+
+# Pretty print timing analysis to stdout
+Query.print_timing_info(timing_info)
+
+query.close()
+```
+
+### Timing Data Structure
+
+The timing information depends on the backend used, but for the parquet/DuckDB backend, it includes:
+
+- **Execution breakdown**: Time spent on cache lookup, index lookup, data reading, and processing
+- **File access patterns**: Number of files accessed and points per file distribution
+- **Query details**: SQL queries generated and backend-specific metrics
+- **Storage information**: File sizes, optimization status, and cache utilization
+
+### Example Usage
+
+```python
+# Analyze a slow query
+points, timing = query.get_points(problematic_label, timing=True)
+
+# Print detailed timing analysis
+Query.print_timing_info(timing)
+
+# Access specific metrics programmatically
+files_accessed = timing['query_efficiency']['files_accessed']
+avg_points_per_file = timing['query_efficiency']['points_per_file_range']['avg']
+total_time = timing['total_time']
+
+if files_accessed > 10:
+    print("Consider running optimization pipeline")
+```
+
 ## Testing
 
 PoCADuck includes a comprehensive test suite to verify functionality. Here's how to run the tests:
