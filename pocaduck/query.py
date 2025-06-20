@@ -15,31 +15,201 @@ from pathlib import Path
 
 from .storage_config import StorageConfig
 
+# VastDB imports (optional - only loaded if needed)
+try:
+    import vastdb
+    import pyarrow as pa
+    VASTDB_AVAILABLE = True
+except ImportError:
+    VASTDB_AVAILABLE = False
+
 # Default thread count to use when os.cpu_count() fails
 DEFAULT_THREAD_COUNT = 8
 
 
-class Query:
+class VastDBQueryBackend:
     """
-    Handles querying of point clouds across blocks.
+    VastDB-based backend for point cloud queries.
+    
+    This backend uses VastDB as both storage and query engine, eliminating the need
+    for file-based sharding and complex optimization pipelines.
+    """
+    
+    def __init__(self, storage_config: StorageConfig, **kwargs):
+        """
+        Initialize VastDB connection.
+        
+        Args:
+            storage_config: Storage configuration with VastDB parameters
+            **kwargs: Additional arguments (ignored for VastDB)
+        """
+        if not VASTDB_AVAILABLE:
+            raise ImportError("VastDB SDK is not available. Please install vastdb package.")
+        
+        self.storage_config = storage_config
+        
+        # Connect to VastDB
+        self.session = vastdb.connect(
+            endpoint=storage_config.vastdb_endpoint,
+            access=storage_config.vastdb_access_key,
+            secret=storage_config.vastdb_secret_key
+        )
+        
+        # Get references to bucket, schema, and table
+        self.bucket = self.session.bucket(storage_config.vastdb_bucket)
+        self.schema = self.bucket.schema(storage_config.vastdb_schema)
+        self.table = self.schema.table(storage_config.vastdb_table)
+    
+    def get_labels(self) -> np.ndarray:
+        """Get all available labels."""
+        result = self.table.select(columns=['label'])
+        if len(result) == 0:
+            return np.array([], dtype=np.uint64)
+        return result['label'].to_numpy().astype(np.uint64)
+    
+    def get_point_count(self, label: int, timing: bool = False) -> Union[int, Tuple[int, Dict]]:
+        """Get point count for a label."""
+        # Convert numpy.uint64 to int if necessary
+        if isinstance(label, np.integer):
+            label = int(label)
+        
+        if not timing:
+            result = self.table.select(
+                columns=['point_count'],
+                predicate=(self.table.label == label)
+            )
+            return result['point_count'][0] if len(result) > 0 else 0
+        
+        # Timing version
+        start_time = time.time()
+        query_start = time.time()
+        result = self.table.select(
+            columns=['point_count'],
+            predicate=(self.table.label == label)
+        )
+        query_time = time.time() - query_start
+        
+        timing_info = {
+            'label': label,
+            'total_time': time.time() - start_time,
+            'query_time': query_time,
+            'query_type': 'vastdb_point_count',
+            'backend': 'vastdb',
+            'files_accessed': 1,
+            'using_optimized_data': True,  # VastDB is inherently optimized
+            'sql_query': f"SELECT point_count FROM {self.storage_config.vastdb_table} WHERE label = {label}"
+        }
+        
+        count = result['point_count'][0] if len(result) > 0 else 0
+        return count, timing_info
+    
+    def get_blocks_for_label(self, label: int, timing: bool = False) -> Union[List[str], Tuple[List[str], Dict]]:
+        """Get blocks for label (not applicable for VastDB)."""
+        # Convert numpy.uint64 to int if necessary
+        if isinstance(label, np.integer):
+            label = int(label)
+        
+        if not timing:
+            return []  # No concept of blocks in VastDB
+        
+        timing_info = {
+            'label': label,
+            'total_time': 0.0,
+            'query_type': 'vastdb_blocks',
+            'backend': 'vastdb',
+            'blocks_found': 0,
+            'using_optimized_data': True,
+            'note': 'Block concept not applicable for VastDB backend'
+        }
+        return [], timing_info
+    
+    def get_points(self, label: int, use_cache: bool = True, timing: bool = False) -> Union[np.ndarray, Tuple[np.ndarray, Dict]]:
+        """Get all points for a label."""
+        # Convert numpy.uint64 to int if necessary
+        if isinstance(label, np.integer):
+            label = int(label)
+        
+        if not timing:
+            result = self.table.select(
+                columns=['points'],
+                predicate=(self.table.label == label)
+            )
+            if len(result) == 0:
+                return np.array([], dtype=np.int64).reshape(0, -1)  # n-dimensional empty array
+            
+            points_list = result['points'][0]  # Get first (and only) row
+            if points_list is None or len(points_list) == 0:
+                return np.array([], dtype=np.int64).reshape(0, -1)  # n-dimensional empty array
+            
+            return np.array(points_list, dtype=np.int64)
+        
+        # Timing version
+        start_time = time.time()
+        query_start = time.time()
+        result = self.table.select(
+            columns=['points'],
+            predicate=(self.table.label == label)
+        )
+        query_time = time.time() - query_start
+        
+        processing_start = time.time()
+        if len(result) == 0:
+            points = np.array([], dtype=np.int64).reshape(0, -1)  # n-dimensional empty array
+        else:
+            points_list = result['points'][0]
+            if points_list is None or len(points_list) == 0:
+                points = np.array([], dtype=np.int64).reshape(0, -1)  # n-dimensional empty array
+            else:
+                points = np.array(points_list, dtype=np.int64)
+        processing_time = time.time() - processing_start
+        
+        timing_info = {
+            'label': label,
+            'total_time': time.time() - start_time,
+            'query_time': query_time,
+            'processing_time': processing_time,
+            'query_type': 'vastdb_points',
+            'backend': 'vastdb',
+            'using_optimized_data': True,
+            'files_accessed': 1,
+            'points_returned': len(points),
+            'cache_hit': False,  # VastDB handles its own caching
+            'query_efficiency': {
+                'total_points': len(points),
+                'files_accessed': 1,
+                'points_per_file_range': {
+                    'min': len(points),
+                    'max': len(points),
+                    'avg': float(len(points))
+                },
+                'points_per_file_counts': [len(points)] if len(points) > 0 else []
+            },
+            'file_details': [{
+                'file_path': f'vastdb://{self.storage_config.vastdb_bucket}/{self.storage_config.vastdb_schema}/{self.storage_config.vastdb_table}',
+                'file_size_mb': 0.0,  # Not applicable for VastDB
+                'actual_points_in_file': len(points),
+                'read_time': query_time
+            }],
+            'sql_query': f"SELECT points FROM {self.storage_config.vastdb_table} WHERE label = {label}"
+        }
+        
+        return points, timing_info
+    
+    def close(self):
+        """Close VastDB connection."""
+        if hasattr(self, 'session') and self.session:
+            # VastDB connections are typically managed automatically
+            # but we can explicitly clean up if needed
+            self.session = None
 
-    The Query class provides methods to retrieve 3D point clouds for labels,
-    automatically aggregating the points across all blocks that contain the label.
 
-    Note: This class always opens the database in read-only mode since it only
-    performs read operations. This allows access to databases where the user
-    only has read permissions.
-
-    Optimization Support:
-    This class automatically detects and uses optimized data if available in the
-    {base_path}/optimized directory. Optimized data can be created using the
-    optimize_point_cloud.py script, which reorganizes point clouds by label for
-    significantly faster retrieval.
-
-    Attributes:
-        storage_config: Configuration for storage backend.
-        db_connection: Connection to the DuckDB database for indexing.
-        using_optimized_data: Boolean indicating if optimized data is being used.
+class ParquetDuckDBQueryBackend:
+    """
+    Parquet + DuckDB backend for point cloud queries.
+    
+    This is the file-based implementation using parquet files for storage
+    and DuckDB for indexing and queries. Fully featured with optimization
+    support, caching, and comprehensive timing analysis.
     """
     
     def __init__(
@@ -50,7 +220,7 @@ class Query:
         cache_size: int = 10
     ):
         """
-        Initialize a Query instance.
+        Initialize the parquet + DuckDB backend.
 
         Args:
             storage_config: Configuration for storage backend.
@@ -100,121 +270,36 @@ class Query:
         optimized_dir = os.path.join(self.storage_config.base_path, "optimized")
         if not os.path.isdir(optimized_dir):
             return False, None, None
-
+        
         # Check if optimized index exists
         optimized_index = os.path.join(optimized_dir, "optimized_index.db")
         if not os.path.exists(optimized_index):
             return False, None, None
-
+        
         return True, optimized_index, optimized_dir
-
-    def _initialize_db_connection(self) -> duckdb.DuckDBPyConnection:
-        """
-        Initialize connection to DuckDB for querying with optimized settings
-        for parallel processing.
-
-        Returns:
-            DuckDB connection.
-        """
-        # Always use read-only mode since Query class only performs read operations
-        # This allows access to databases where the user only has read permissions
+    
+    def _initialize_db_connection(self):
+        """Initialize DuckDB connection with storage configuration."""
         con = duckdb.connect(self.index_path, read_only=True)
-
-        # Apply storage configuration
+        
+        # Configure DuckDB for storage backend
         duckdb_config = self.storage_config.get_duckdb_config()
         for key, value in duckdb_config.items():
             con.execute(f"SET {key}='{value}'")
-
-        # Configure DuckDB for optimal performance
+        
+        # Set thread count for parallel processing
         con.execute(f"PRAGMA threads={self.threads}")
-
+        
         return con
     
     def get_labels(self) -> np.ndarray:
-        """
-        Get all labels in the database.
-        
-        Returns:
-            Numpy array of all unique label IDs.
-        """
+        """Get all unique labels available in the database."""
         result = self.db_connection.execute("SELECT DISTINCT label FROM point_cloud_index").fetchall()
         return np.array([r[0] for r in result], dtype=np.uint64)
     
-    def get_blocks_for_label(self, label: int, timing: bool = False) -> Union[List[str], Tuple[List[str], Dict]]:
-        """
-        Get all blocks that contain a specific label.
-        
-        Note: For optimized data, this returns an empty list since 
-        optimized data consolidates all blocks for each label.
-        
-        Args:
-            label: The label to query for.
-            timing: If True, return timing information as second element of tuple.
-            
-        Returns:
-            List of unique block IDs that contain the label, or empty list for optimized data.
-            If timing=True, returns (blocks, timing_info) tuple.
-        """
-        # Convert numpy.uint64 to int if necessary
-        if isinstance(label, np.integer):
-            label = int(label)
-        
-        if not timing:
-            # If using optimized data, block information is not available
-            if self.using_optimized_data:
-                return []
-                
-            # With our new schema, we may have multiple entries for the same label-block combination
-            # due to splitting large point clouds, so we need to select distinct block_ids
-            result = self.db_connection.execute(
-                "SELECT DISTINCT block_id FROM point_cloud_index WHERE label = ?",
-                [label]
-            ).fetchall()
-            return [r[0] for r in result]
-        
-        # Timing-enabled version
-        start_time = time.time()
-        timing_info = {
-            'total_time': 0.0,
-            'index_lookup_time': 0.0,
-            'using_optimized_data': self.using_optimized_data,
-            'blocks_found': 0
-        }
-        
-        # If using optimized data, block information is not available
-        if self.using_optimized_data:
-            timing_info['total_time'] = time.time() - start_time
-            timing_info['sql_query'] = "N/A (optimized data has no block information)"
-            return [], timing_info
-        
-        # Execute query with timing
-        timing_info['sql_query'] = "SELECT DISTINCT block_id FROM point_cloud_index WHERE label = ?"
-        index_start = time.time()
-        result = self.db_connection.execute(
-            "SELECT DISTINCT block_id FROM point_cloud_index WHERE label = ?",
-            [label]
-        ).fetchall()
-        timing_info['index_lookup_time'] = time.time() - index_start
-        timing_info['total_time'] = time.time() - start_time
-        
-        blocks = [r[0] for r in result]
-        timing_info['blocks_found'] = len(blocks)
-        
-        return blocks, timing_info
-    
     def get_point_count(self, label: int, timing: bool = False) -> Union[int, Tuple[int, Dict]]:
-        """
-        Get the total number of points for a specific label.
-        
-        Args:
-            label: The label to query for.
-            timing: If True, return timing information as second element of tuple.
-            
-        Returns:
-            Total number of points for the label across all blocks.
-            If timing=True, returns (count, timing_info) tuple.
-        """
-        # Convert numpy.uint64 to int if necessary
+        """Get the total number of points for a specific label."""
+        # Convert numpy.uint64 to int if necessary for DuckDB compatibility
         if isinstance(label, np.integer):
             label = int(label)
         
@@ -225,514 +310,510 @@ class Query:
             ).fetchone()
             return result[0] if result[0] is not None else 0
         
-        # Timing-enabled version
+        # Timing version
         start_time = time.time()
-        timing_info = {
-            'total_time': 0.0,
-            'index_lookup_time': 0.0,
-            'files_queried': 0,
-            'sql_query': "SELECT SUM(point_count) FROM point_cloud_index WHERE label = ?",
-            'using_optimized_data': self.using_optimized_data
-        }
         
-        # Execute query with timing
+        # Index lookup timing
         index_start = time.time()
         result = self.db_connection.execute(
             "SELECT SUM(point_count) FROM point_cloud_index WHERE label = ?",
             [label]
         ).fetchone()
-        timing_info['index_lookup_time'] = time.time() - index_start
-        
-        # Get file count for this label
-        files_result = self.db_connection.execute(
-            "SELECT COUNT(DISTINCT file_path) FROM point_cloud_index WHERE label = ?",
-            [label]
-        ).fetchone()
-        timing_info['files_queried'] = files_result[0] if files_result[0] is not None else 0
-        
-        timing_info['total_time'] = time.time() - start_time
+        index_lookup_time = time.time() - index_start
         
         count = result[0] if result[0] is not None else 0
+        
+        timing_info = {
+            'label': label,
+            'total_time': time.time() - start_time,
+            'index_lookup_time': index_lookup_time,
+            'query_type': 'parquet_duckdb_point_count',
+            'backend': 'parquet_duckdb',
+            'using_optimized_data': self.using_optimized_data,
+            'points_returned': count
+        }
+        
         return count, timing_info
     
-    def get_points(self, label: int, use_cache: bool = True, timing: bool = False) -> Union[np.ndarray, Tuple[np.ndarray, Dict]]:
-        """
-        Get all point data for a specific label.
-
-        This method automatically uses optimized data if available, for better performance.
-
-        Args:
-            label: The label to query for.
-            use_cache: Whether to use the in-memory point cloud cache (if enabled).
-            timing: If True, return timing information as second element of tuple.
-
-        Returns:
-            Numpy array containing all point data for the label. The shape is (N, D) where
-            N is the number of points and D is the dimension of the point data.
-            If timing=True, returns (points, timing_info) tuple.
-        """
-        # Convert numpy.uint64 to int if necessary
+    def get_blocks_for_label(self, label: int, timing: bool = False) -> Union[List[str], Tuple[List[str], Dict]]:
+        """Get all blocks that contain a specific label."""
+        # Convert numpy.uint64 to int if necessary for DuckDB compatibility
         if isinstance(label, np.integer):
             label = int(label)
-
+        
         if not timing:
-            # Check if the points are in the cache
-            if use_cache and self.cache_size > 0 and label in self._points_cache:
-                # Move this label to the end of the cache to mark it as most recently used
-                points = self._points_cache.pop(label)
-                self._points_cache[label] = points
-                return points
-
-            # Use optimized data if available, otherwise fall back to original method
+            if self.using_optimized_data:
+                # Optimized data doesn't have blocks in the traditional sense
+                return []
+            
+            result = self.db_connection.execute(
+                "SELECT DISTINCT block_id FROM point_cloud_index WHERE label = ?",
+                [label]
+            ).fetchall()
+            return [r[0] for r in result]
+        
+        # Timing version
+        start_time = time.time()
+        
+        if self.using_optimized_data:
+            blocks = []
+        else:
+            index_start = time.time()
+            result = self.db_connection.execute(
+                "SELECT DISTINCT block_id FROM point_cloud_index WHERE label = ?",
+                [label]
+            ).fetchall()
+            index_lookup_time = time.time() - index_start
+            blocks = [r[0] for r in result]
+        
+        timing_info = {
+            'label': label,
+            'total_time': time.time() - start_time,
+            'index_lookup_time': index_lookup_time if not self.using_optimized_data else 0.0,
+            'query_type': 'parquet_duckdb_blocks',
+            'backend': 'parquet_duckdb',
+            'using_optimized_data': self.using_optimized_data,
+            'blocks_found': len(blocks)
+        }
+        
+        return blocks, timing_info
+    
+    def get_points(self, label: int, use_cache: bool = True, timing: bool = False) -> Union[np.ndarray, Tuple[np.ndarray, Dict]]:
+        """Get all point data for a specific label."""
+        # Convert numpy.uint64 to int if necessary for DuckDB compatibility
+        if isinstance(label, np.integer):
+            label = int(label)
+        
+        if not timing:
             if self.using_optimized_data:
                 return self._get_points_optimized(label, use_cache)
             else:
                 return self._get_points_original(label, use_cache)
+        else:
+            if self.using_optimized_data:
+                return self._get_points_optimized_with_timing(label, use_cache)
+            else:
+                return self._get_points_original_with_timing(label, use_cache)
+    
+    def _get_points_optimized(self, label: int, use_cache: bool = True) -> np.ndarray:
+        """Get points from optimized data structure (without timing)."""
+        # Check cache first if enabled
+        if use_cache and label in self._points_cache:
+            return self._points_cache[label]
         
-        # Timing-enabled version
+        # Query the optimized index
+        result = self.db_connection.execute(
+            "SELECT file_path FROM point_cloud_index WHERE label = ?",
+            [label]
+        ).fetchall()
+        
+        if not result:
+            return np.array([], dtype=np.int64).reshape(0, -1)  # n-dimensional empty array
+        
+        points_list = []
+        for row in result:
+            file_path = row[0]
+            
+            # Read the parquet file and filter for this label
+            df = pd.read_parquet(file_path)
+            label_points = df[df['label'] == label][['x', 'y', 'z']].values
+            if len(label_points) > 0:
+                points_list.append(label_points)
+        
+        if not points_list:
+            final_points = np.array([], dtype=np.int64).reshape(0, -1)
+        else:
+            final_points = np.vstack(points_list).astype(np.int64)
+        
+        # Update cache
+        self._update_cache(label, final_points)
+        
+        return final_points
+    
+    def _get_points_original(self, label: int, use_cache: bool = True) -> np.ndarray:
+        """Get points from original data structure (without timing)."""
+        # Check cache first if enabled
+        if use_cache and label in self._points_cache:
+            return self._points_cache[label]
+        
+        # Get file paths and metadata for this label
+        result = self.db_connection.execute("""
+            SELECT file_path, block_id, point_count
+            FROM point_cloud_index 
+            WHERE label = ?
+        """, [label]).fetchall()
+        
+        if not result:
+            return np.array([], dtype=np.int64).reshape(0, -1)  # n-dimensional empty array
+        
+        points_list = []
+        for row in result:
+            file_path, block_id, _ = row
+            
+            # Read the parquet file and filter for this label in this block
+            df = pd.read_parquet(file_path)
+            label_block_points = df[(df['label'] == label) & (df['block_id'] == block_id)]
+            
+            if len(label_block_points) > 0:
+                # Extract coordinate columns (x, y, z and any additional dimensions)
+                coord_cols = [col for col in df.columns if col not in ['label', 'block_id']]
+                points = label_block_points[coord_cols].values
+                points_list.append(points)
+        
+        if not points_list:
+            final_points = np.array([], dtype=np.int64).reshape(0, -1)
+        else:
+            # Stack all points and remove duplicates
+            stacked_points = np.vstack(points_list).astype(np.int64)
+            final_points = np.unique(stacked_points, axis=0)
+        
+        # Update cache
+        self._update_cache(label, final_points)
+        
+        return final_points
+    
+    def _get_points_optimized_with_timing(self, label: int, use_cache: bool = True) -> Tuple[np.ndarray, Dict]:
+        """Get points from optimized data with detailed timing."""
         start_time = time.time()
+        
+        # Cache lookup timing
+        cache_start = time.time()
+        cache_hit = use_cache and label in self._points_cache
+        if cache_hit:
+            cached_points = self._points_cache[label]
+            cache_lookup_time = time.time() - cache_start
+            
+            timing_info = {
+                'label': label,
+                'total_time': time.time() - start_time,
+                'cache_lookup_time': cache_lookup_time,
+                'cache_hit': True,
+                'using_optimized_data': True,
+                'points_returned': len(cached_points),
+                'query_type': 'parquet_duckdb_optimized',
+                'backend': 'parquet_duckdb'
+            }
+            return cached_points, timing_info
+        
+        cache_lookup_time = time.time() - cache_start
+        
+        # Index lookup timing
+        index_start = time.time()
+        result = self.db_connection.execute(
+            "SELECT file_path FROM point_cloud_index WHERE label = ?",
+            [label]
+        ).fetchall()
+        index_lookup_time = time.time() - index_start
+        
+        if not result:
+            empty_points = np.array([], dtype=np.int64).reshape(0, -1)
+            timing_info = {
+                'label': label,
+                'total_time': time.time() - start_time,
+                'cache_lookup_time': cache_lookup_time,
+                'index_lookup_time': index_lookup_time,
+                'cache_hit': False,
+                'using_optimized_data': True,
+                'points_returned': 0,
+                'files_accessed': 0,
+                'query_type': 'parquet_duckdb_optimized',
+                'backend': 'parquet_duckdb'
+            }
+            return empty_points, timing_info
+        
+        # Data reading timing
+        data_read_start = time.time()
+        points_list = []
+        file_details = []
+        
+        for row in result:
+            file_path = row[0]
+            file_read_start = time.time()
+            
+            # Read the parquet file and filter for this label
+            df = pd.read_parquet(file_path)
+            label_points = df[df['label'] == label]
+            
+            if len(label_points) > 0:
+                # Extract coordinate columns
+                coord_cols = [col for col in df.columns if col not in ['label', 'block_id']]
+                points = label_points[coord_cols].values
+                points_list.append(points)
+            
+            file_read_time = time.time() - file_read_start
+            file_size_mb = os.path.getsize(file_path) / (1024 * 1024) if os.path.exists(file_path) else 0
+            
+            file_details.append({
+                'file_path': file_path,
+                'file_size_mb': file_size_mb,
+                'actual_points_in_file': len(label_points),
+                'read_time': file_read_time
+            })
+        
+        data_read_time = time.time() - data_read_start
+        
+        # Processing timing
+        processing_start = time.time()
+        if not points_list:
+            final_points = np.array([], dtype=np.int64).reshape(0, -1)
+        else:
+            final_points = np.vstack(points_list).astype(np.int64)
+        
+        # Update cache
+        self._update_cache(label, final_points)
+        processing_time = time.time() - processing_start
+        
+        # Build timing info
         timing_info = {
             'label': label,
-            'total_time': 0.0,
-            'cache_lookup_time': 0.0,
-            'index_lookup_time': 0.0,
-            'data_read_time': 0.0,
-            'processing_time': 0.0,
-            'files_queried': 0,
-            'file_details': [],
-            'query_efficiency': {},
-            'sql_query': '',
-            'using_optimized_data': self.using_optimized_data,
+            'total_time': time.time() - start_time,
+            'cache_lookup_time': cache_lookup_time,
+            'index_lookup_time': index_lookup_time,
+            'data_read_time': data_read_time,
+            'processing_time': processing_time,
             'cache_hit': False,
-            'points_returned': 0
+            'using_optimized_data': True,
+            'points_returned': len(final_points),
+            'files_accessed': len(result),
+            'query_type': 'parquet_duckdb_optimized',
+            'backend': 'parquet_duckdb',
+            'file_details': file_details,
+            'query_efficiency': {
+                'total_points': len(final_points),
+                'files_accessed': len(result),
+                'points_per_file_range': {
+                    'min': min([f['actual_points_in_file'] for f in file_details]) if file_details else 0,
+                    'max': max([f['actual_points_in_file'] for f in file_details]) if file_details else 0,
+                    'avg': np.mean([f['actual_points_in_file'] for f in file_details]) if file_details else 0
+                },
+                'points_per_file_counts': [f['actual_points_in_file'] for f in file_details]
+            }
         }
-
-        # Check cache first
-        cache_start = time.time()
-        if use_cache and self.cache_size > 0 and label in self._points_cache:
-            points = self._points_cache.pop(label)
-            self._points_cache[label] = points
-            timing_info['cache_hit'] = True
-            timing_info['cache_lookup_time'] = time.time() - cache_start
-            timing_info['total_time'] = time.time() - start_time
-            timing_info['points_returned'] = len(points)
-            return points, timing_info
         
-        timing_info['cache_lookup_time'] = time.time() - cache_start
-
-        # Use optimized data if available, otherwise fall back to original method
-        if self.using_optimized_data:
-            points, method_timing = self._get_points_optimized_with_timing(label, use_cache)
-        else:
-            points, method_timing = self._get_points_original_with_timing(label, use_cache)
-        
-        # Merge method timing into main timing info
-        for key, value in method_timing.items():
-            if key in timing_info:
-                timing_info[key] = value
-        
-        timing_info['total_time'] = time.time() - start_time
-        timing_info['points_returned'] = len(points)
-        
-        return points, timing_info
-
-    def _get_points_optimized_with_timing(self, label: int, use_cache: bool = True) -> Tuple[np.ndarray, Dict]:
-        """
-        Get points using the optimized data structure with detailed timing information.
-
-        Args:
-            label: The label to query for.
-            use_cache: Whether to use the in-memory point cloud cache (if enabled).
-
-        Returns:
-            Tuple of (points array, timing_info dict).
-        """
-        timing_info = {
-            'index_lookup_time': 0.0,
-            'data_read_time': 0.0,
-            'processing_time': 0.0,
-            'files_queried': 0,
-            'file_details': [],
-            'query_efficiency': {},
-            'sql_query': ''
-        }
-
-        # Get file info from the optimized index
-        index_start = time.time()
-        file_info = self.db_connection.execute(
-            "SELECT DISTINCT file_path FROM point_cloud_index WHERE label = ?",
-            [label]
-        ).fetchall()
-        timing_info['index_lookup_time'] = time.time() - index_start
-
-        if not file_info:
-            # No data for this label
-            empty_result = np.array([], dtype=np.int64)
-            if use_cache and self.cache_size > 0:
-                self._update_cache(label, empty_result)
-            timing_info['files_queried'] = 0
-            timing_info['sql_query'] = "SELECT DISTINCT file_path FROM point_cloud_index WHERE label = ?"
-            return empty_result, timing_info
-
-        # Handle multiple files for a single label
-        file_paths = [info[0] for info in file_info]
-        timing_info['files_queried'] = len(file_paths)
-        
-        # Get detailed file information
-        for file_path in file_paths:
-            file_detail = {'file_path': file_path}
-            if os.path.exists(file_path):
-                file_detail['file_size_mb'] = os.path.getsize(file_path) / (1024 * 1024)
-            else:
-                file_detail['file_size_mb'] = 0.0
-            timing_info['file_details'].append(file_detail)
-        
-        # Query all files that contain this label
-        query = f"""
-            SELECT data
-            FROM parquet_scan([{','.join(f"'{path}'" for path in file_paths)}])
-            WHERE label = {label}
-        """
-        timing_info['sql_query'] = query
-
-        # Execute query and get results as Pandas DataFrame
-        data_start = time.time()
-        df = self.db_connection.execute(query).fetchdf()
-        timing_info['data_read_time'] = time.time() - data_start
-
-        # Handle empty result
-        if len(df) == 0:
-            empty_result = np.array([], dtype=np.int64)
-            if use_cache and self.cache_size > 0:
-                self._update_cache(label, empty_result)
-            timing_info['query_efficiency']['points_per_file'] = 0.0
-            return empty_result, timing_info
-
-        # Process the data
-        processing_start = time.time()
-        points_list = df['data'].tolist()
-        points = np.array(points_list, dtype=np.int64)
-        timing_info['processing_time'] = time.time() - processing_start
-
-        # Get actual points per file by querying each file individually
-        points_per_file_counts = []
-        individual_read_start = time.time()
-        
-        for file_path in file_paths:
-            file_query = f"SELECT COUNT(*) FROM parquet_scan('{file_path}') WHERE label = {label}"
-            file_count_result = self.db_connection.execute(file_query).fetchone()
-            file_points = file_count_result[0] if file_count_result[0] is not None else 0
-            points_per_file_counts.append(file_points)
-        
-        individual_query_time = time.time() - individual_read_start
-
-        # Calculate efficiency metrics
-        total_points = len(points)
-        timing_info['query_efficiency'] = {
-            'total_points': total_points,
-            'files_accessed': len(file_paths),
-            'points_per_file_range': {
-                'min': min(points_per_file_counts) if points_per_file_counts else 0,
-                'max': max(points_per_file_counts) if points_per_file_counts else 0,
-                'avg': sum(points_per_file_counts) / len(points_per_file_counts) if points_per_file_counts else 0.0
-            },
-            'points_per_file_counts': points_per_file_counts,
-            'individual_file_query_time': individual_query_time
-        }
-
-        # Update file details with actual point counts
-        for i, file_detail in enumerate(timing_info['file_details']):
-            if i < len(points_per_file_counts):
-                file_detail['actual_points_in_file'] = points_per_file_counts[i]
-            file_detail['read_time'] = timing_info['data_read_time'] / len(file_paths)
-
-        # Cache the result if enabled
-        if use_cache and self.cache_size > 0:
-            self._update_cache(label, points)
-
-        return points, timing_info
-
-    def _get_points_optimized(self, label: int, use_cache: bool = True) -> np.ndarray:
-        """
-        Get points using the optimized data structure.
-
-        Args:
-            label: The label to query for.
-            use_cache: Whether to use the in-memory point cloud cache (if enabled).
-
-        Returns:
-            Numpy array containing all point data for the label.
-        """
-        # Get file info from the optimized index
-        file_info = self.db_connection.execute(
-            "SELECT DISTINCT file_path FROM point_cloud_index WHERE label = ?",
-            [label]
-        ).fetchall()
-
-        if not file_info:
-            # No data for this label
-            empty_result = np.array([], dtype=np.int64)
-            if use_cache and self.cache_size > 0:
-                self._update_cache(label, empty_result)
-            return empty_result
-
-        # Handle multiple files for a single label
-        file_paths = [info[0] for info in file_info]
-        
-        # Query all files that contain this label
-        query = f"""
-            SELECT data
-            FROM parquet_scan([{','.join(f"'{path}'" for path in file_paths)}])
-            WHERE label = {label}
-        """
-
-        # Execute query and get results as Pandas DataFrame
-        df = self.db_connection.execute(query).fetchdf()
-
-        # Handle empty result
-        if len(df) == 0:
-            empty_result = np.array([], dtype=np.int64)
-            if use_cache and self.cache_size > 0:
-                self._update_cache(label, empty_result)
-            return empty_result
-
-        # Get the points - convert list of point rows to 2D numpy array
-        points_list = df['data'].tolist()
-        points = np.array(points_list, dtype=np.int64)
-
-        # Cache the result if enabled
-        if use_cache and self.cache_size > 0:
-            self._update_cache(label, points)
-
-        return points
-
+        return final_points, timing_info
+    
     def _get_points_original_with_timing(self, label: int, use_cache: bool = True) -> Tuple[np.ndarray, Dict]:
-        """
-        Original implementation with timing information.
-
-        Args:
-            label: The label to query for.
-            use_cache: Whether to use the in-memory point cloud cache (if enabled).
-
-        Returns:
-            Tuple of (points array, timing_info dict).
-        """
-        timing_info = {
-            'index_lookup_time': 0.0,
-            'data_read_time': 0.0,
-            'processing_time': 0.0,
-            'files_queried': 0,
-            'file_details': [],
-            'query_efficiency': {},
-            'sql_query': ''
-        }
-
-        # Find all files containing this label
+        """Get points from original data with detailed timing."""
+        start_time = time.time()
+        
+        # Cache lookup timing
+        cache_start = time.time()
+        cache_hit = use_cache and label in self._points_cache
+        if cache_hit:
+            cached_points = self._points_cache[label]
+            cache_lookup_time = time.time() - cache_start
+            
+            timing_info = {
+                'label': label,
+                'total_time': time.time() - start_time,
+                'cache_lookup_time': cache_lookup_time,
+                'cache_hit': True,
+                'using_optimized_data': False,
+                'points_returned': len(cached_points),
+                'query_type': 'parquet_duckdb_original',
+                'backend': 'parquet_duckdb'
+            }
+            return cached_points, timing_info
+        
+        cache_lookup_time = time.time() - cache_start
+        
+        # Index lookup timing
         index_start = time.time()
-        file_info = self.db_connection.execute(
-            "SELECT DISTINCT file_path FROM point_cloud_index WHERE label = ?",
-            [label]
-        ).fetchall()
-        timing_info['index_lookup_time'] = time.time() - index_start
-
-        file_paths = [info[0] for info in file_info]
-        timing_info['files_queried'] = len(file_paths)
-
-        if not file_paths:
-            # No data for this label
-            empty_result = np.array([], dtype=np.int64)
-            if use_cache and self.cache_size > 0:
-                self._update_cache(label, empty_result)
-            timing_info['sql_query'] = "SELECT DISTINCT file_path FROM point_cloud_index WHERE label = ?"
-            return empty_result, timing_info
-
-        # Get detailed file information
-        for file_path in file_paths:
-            file_detail = {'file_path': file_path}
-            if os.path.exists(file_path):
-                file_detail['file_size_mb'] = os.path.getsize(file_path) / (1024 * 1024)
-            else:
-                file_detail['file_size_mb'] = 0.0
-            timing_info['file_details'].append(file_detail)
-
-        # Use the most reliable query to get the point data
-        query = f"""
-            SELECT data
-            FROM parquet_scan([{','.join(f"'{path}'" for path in file_paths)}])
-            WHERE label = {label}
-        """
-        timing_info['sql_query'] = query
-
-        # Execute query and get results as Pandas DataFrame
-        data_start = time.time()
-        df = self.db_connection.execute(query).fetchdf()
-        timing_info['data_read_time'] = time.time() - data_start
-
-        # Handle empty result
-        if len(df) == 0:
-            empty_result = np.array([], dtype=np.int64)
-            if use_cache and self.cache_size > 0:
-                self._update_cache(label, empty_result)
-            timing_info['query_efficiency']['points_per_file'] = 0.0
-            return empty_result, timing_info
-
-        # Process the data
+        result = self.db_connection.execute("""
+            SELECT file_path, block_id, point_count
+            FROM point_cloud_index 
+            WHERE label = ?
+        """, [label]).fetchall()
+        index_lookup_time = time.time() - index_start
+        
+        if not result:
+            empty_points = np.array([], dtype=np.int64).reshape(0, -1)
+            timing_info = {
+                'label': label,
+                'total_time': time.time() - start_time,
+                'cache_lookup_time': cache_lookup_time,
+                'index_lookup_time': index_lookup_time,
+                'cache_hit': False,
+                'using_optimized_data': False,
+                'points_returned': 0,
+                'files_accessed': 0,
+                'query_type': 'parquet_duckdb_original',
+                'backend': 'parquet_duckdb'
+            }
+            return empty_points, timing_info
+        
+        # Data reading timing
+        data_read_start = time.time()
+        points_list = []
+        file_details = []
+        files_processed = set()
+        
+        for row in result:
+            file_path, block_id, _ = row
+            
+            # Avoid re-reading the same file multiple times
+            if file_path not in files_processed:
+                file_read_start = time.time()
+                
+                # Read the parquet file
+                df = pd.read_parquet(file_path)
+                files_processed.add(file_path)
+                
+                # Filter for this label in any block within this file
+                label_points = df[df['label'] == label]
+                
+                if len(label_points) > 0:
+                    # Extract coordinate columns (x, y, z and any additional dimensions)
+                    coord_cols = [col for col in df.columns if col not in ['label', 'block_id']]
+                    points = label_points[coord_cols].values
+                    points_list.append(points)
+                
+                file_read_time = time.time() - file_read_start
+                file_size_mb = os.path.getsize(file_path) / (1024 * 1024) if os.path.exists(file_path) else 0
+                
+                file_details.append({
+                    'file_path': file_path,
+                    'file_size_mb': file_size_mb,
+                    'actual_points_in_file': len(label_points),
+                    'read_time': file_read_time
+                })
+        
+        data_read_time = time.time() - data_read_start
+        
+        # Processing timing (includes deduplication)
         processing_start = time.time()
-        points_list = df['data'].tolist()
-
         if not points_list:
-            empty_result = np.array([], dtype=np.int64)
-            if use_cache and self.cache_size > 0:
-                self._update_cache(label, empty_result)
-            timing_info['processing_time'] = time.time() - processing_start
-            timing_info['query_efficiency']['points_per_file'] = 0.0
-            return empty_result, timing_info
-
-        # Stack the points
-        points = np.vstack(points_list).astype(np.int64)
-
-        # Remove duplicates to ensure we only have unique points
-        points = np.unique(points, axis=0)
-        timing_info['processing_time'] = time.time() - processing_start
-
-        # Get actual points per file by querying each file individually
-        points_per_file_counts = []
-        individual_read_start = time.time()
+            final_points = np.array([], dtype=np.int64).reshape(0, -1)
+            deduplication_applied = False
+        else:
+            # Stack all points and remove duplicates
+            stacked_points = np.vstack(points_list).astype(np.int64)
+            pre_dedup_count = len(stacked_points)
+            final_points = np.unique(stacked_points, axis=0)
+            deduplication_applied = len(final_points) < pre_dedup_count
         
-        for file_path in file_paths:
-            file_query = f"SELECT COUNT(*) FROM parquet_scan('{file_path}') WHERE label = {label}"
-            file_count_result = self.db_connection.execute(file_query).fetchone()
-            file_points = file_count_result[0] if file_count_result[0] is not None else 0
-            points_per_file_counts.append(file_points)
+        # Update cache
+        self._update_cache(label, final_points)
+        processing_time = time.time() - processing_start
         
-        individual_query_time = time.time() - individual_read_start
-
-        # Calculate efficiency metrics
-        total_points = len(points)
-        timing_info['query_efficiency'] = {
-            'total_points': total_points,
-            'files_accessed': len(file_paths),
-            'points_per_file_range': {
-                'min': min(points_per_file_counts) if points_per_file_counts else 0,
-                'max': max(points_per_file_counts) if points_per_file_counts else 0,
-                'avg': sum(points_per_file_counts) / len(points_per_file_counts) if points_per_file_counts else 0.0
-            },
-            'points_per_file_counts': points_per_file_counts,
-            'individual_file_query_time': individual_query_time,
-            'deduplication_applied': True
+        # Build timing info
+        timing_info = {
+            'label': label,
+            'total_time': time.time() - start_time,
+            'cache_lookup_time': cache_lookup_time,
+            'index_lookup_time': index_lookup_time,
+            'data_read_time': data_read_time,
+            'processing_time': processing_time,
+            'cache_hit': False,
+            'using_optimized_data': False,
+            'points_returned': len(final_points),
+            'files_accessed': len(files_processed),
+            'deduplication_applied': deduplication_applied,
+            'query_type': 'parquet_duckdb_original',
+            'backend': 'parquet_duckdb',
+            'file_details': file_details,
+            'query_efficiency': {
+                'total_points': len(final_points),
+                'files_accessed': len(files_processed),
+                'points_per_file_range': {
+                    'min': min([f['actual_points_in_file'] for f in file_details]) if file_details else 0,
+                    'max': max([f['actual_points_in_file'] for f in file_details]) if file_details else 0,
+                    'avg': np.mean([f['actual_points_in_file'] for f in file_details]) if file_details else 0
+                },
+                'points_per_file_counts': [f['actual_points_in_file'] for f in file_details]
+            }
         }
-
-        # Update file details with actual point counts
-        for i, file_detail in enumerate(timing_info['file_details']):
-            if i < len(points_per_file_counts):
-                file_detail['actual_points_in_file'] = points_per_file_counts[i]
-            file_detail['read_time'] = timing_info['data_read_time'] / len(file_paths)
-
-        # Cache the result if enabled
-        if use_cache and self.cache_size > 0:
-            self._update_cache(label, points)
-
-        return points, timing_info
-
-    def _get_points_original(self, label: int, use_cache: bool = True) -> np.ndarray:
-        """
-        Original implementation of get_points, used as fallback when optimized data is not available.
-
-        Args:
-            label: The label to query for.
-            use_cache: Whether to use the in-memory point cloud cache (if enabled).
-
-        Returns:
-            Numpy array containing all point data for the label.
-        """
-        # Find all files containing this label
-        file_info = self.db_connection.execute(
-            "SELECT DISTINCT file_path FROM point_cloud_index WHERE label = ?",
-            [label]
-        ).fetchall()
-
-        file_paths = [info[0] for info in file_info]
-
-        if not file_paths:
-            # No data for this label
-            empty_result = np.array([], dtype=np.int64)
-            if use_cache and self.cache_size > 0:
-                self._update_cache(label, empty_result)
-            return empty_result
-
-        # Use the most reliable query to get the point data
-        query = f"""
-            SELECT data
-            FROM parquet_scan([{','.join(f"'{path}'" for path in file_paths)}])
-            WHERE label = {label}
-        """
-
-        # Execute query and get results as Pandas DataFrame
-        df = self.db_connection.execute(query).fetchdf()
-
-        # Handle empty result
-        if len(df) == 0:
-            empty_result = np.array([], dtype=np.int64)
-            if use_cache and self.cache_size > 0:
-                self._update_cache(label, empty_result)
-            return empty_result
-
-        # Convert list-based data column back to numpy arrays and stack them
-        points_list = df['data'].tolist()
-
-        if not points_list:
-            empty_result = np.array([], dtype=np.int64)
-            if use_cache and self.cache_size > 0:
-                self._update_cache(label, empty_result)
-            return empty_result
-
-        # Stack the points
-        points = np.vstack(points_list).astype(np.int64)
-
-        # Remove duplicates to ensure we only have unique points
-        points = np.unique(points, axis=0)
-
-        # Cache the result if enabled
-        if use_cache and self.cache_size > 0:
-            self._update_cache(label, points)
-
-        return points
         
-    def _update_cache(self, label: int, points: np.ndarray) -> None:
-        """
-        Update the points cache with the given label and points array.
-        
-        Args:
-            label: The label identifier.
-            points: The point cloud data.
-        """
+        return final_points, timing_info
+    
+    def _update_cache(self, label: int, points: np.ndarray):
+        """Update the point cloud cache with LRU eviction."""
         if self.cache_size <= 0:
             return
-            
-        # Add to cache
+        
+        # Remove oldest entries if cache is full
+        while len(self._points_cache) >= self.cache_size:
+            # Remove the first (oldest) entry
+            oldest_label = next(iter(self._points_cache))
+            del self._points_cache[oldest_label]
+        
+        # Add new entry (it becomes the newest)
         self._points_cache[label] = points
-        
-        # If cache is too large, remove least recently used entries
-        if len(self._points_cache) > self.cache_size:
-            # Get a key to remove (the first one in the dict, which is the oldest)
-            # Python 3.7+ preserves insertion order, so this works as a simple LRU cache
-            key_to_remove = next(iter(self._points_cache))
-            del self._points_cache[key_to_remove]
     
-    def close(self) -> None:
-        """
-        Close the query connection and clear caches.
-        
-        This method should be called when the query object is no longer needed.
-        """
-        # Clear the points cache
+    def close(self):
+        """Close the query connection and clear caches."""
         if hasattr(self, '_points_cache'):
             self._points_cache.clear()
-            
-        # Close the database connection
         if hasattr(self, 'db_connection') and self.db_connection is not None:
             self.db_connection.close()
             self.db_connection = None
+
+
+class Query:
+    """
+    Unified interface for querying point clouds using different backends.
+
+    The Query class provides a consistent API for retrieving 3D point clouds for labels
+    across different storage backends:
+    - VastDB: Direct SQL-based key-value storage
+    - Parquet+DuckDB: File-based storage with optimization support
+
+    The backend is automatically selected based on the storage_config.storage_type.
+
+    Attributes:
+        storage_config: Configuration for storage backend
+        _backend: The actual backend implementation (VastDB or Parquet+DuckDB)
+    """
+    
+    def __init__(
+        self,
+        storage_config: StorageConfig,
+        index_path: Optional[str] = None,
+        threads: Optional[int] = None,
+        cache_size: int = 10
+    ):
+        """
+        Initialize a Query instance with the appropriate backend.
+
+        Args:
+            storage_config: Configuration for storage backend
+            index_path: Path to the unified index (only used for Parquet+DuckDB backend)
+            threads: Number of threads to use (only used for Parquet+DuckDB backend)
+            cache_size: Number of label point clouds to cache (only used for Parquet+DuckDB backend)
+        """
+        self.storage_config = storage_config
+        
+        # Select the appropriate backend based on storage type
+        if storage_config.storage_type == "vastdb":
+            self._backend = VastDBQueryBackend(storage_config)
+        elif storage_config.storage_type in ["local", "s3", "gcs", "azure"]:
+            # Use the file-based Parquet+DuckDB backend
+            self._backend = ParquetDuckDBQueryBackend(storage_config, index_path, threads, cache_size)
+        else:
+            raise ValueError(f"Unsupported storage type: {storage_config.storage_type}")
+    
+    # Delegate all methods to the backend
+    def get_labels(self) -> np.ndarray:
+        """Get all available labels."""
+        return self._backend.get_labels()
+    
+    def get_point_count(self, label: int, timing: bool = False) -> Union[int, Tuple[int, Dict]]:
+        """Get the total number of points for a specific label."""
+        return self._backend.get_point_count(label, timing)
+    
+    def get_blocks_for_label(self, label: int, timing: bool = False) -> Union[List[str], Tuple[List[str], Dict]]:
+        """Get all blocks that contain a specific label."""
+        return self._backend.get_blocks_for_label(label, timing)
+    
+    def get_points(self, label: int, use_cache: bool = True, timing: bool = False) -> Union[np.ndarray, Tuple[np.ndarray, Dict]]:
+        """Get all point data for a specific label."""
+        return self._backend.get_points(label, use_cache, timing)
+    
+    def close(self):
+        """Close the query connection and clear caches."""
+        if hasattr(self, '_backend') and self._backend:
+            self._backend.close()
+            self._backend = None
 
     @staticmethod
     def print_timing_info(timing_info: Dict) -> None:

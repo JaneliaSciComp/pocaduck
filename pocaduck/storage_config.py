@@ -14,43 +14,93 @@ import argparse
 @dataclass
 class StorageConfig:
     """
-    Configuration for storage backend (local, S3, GCS, Azure).
+    Configuration for storage backend (local, S3, GCS, Azure, VastDB).
     
     This class handles configuration for different storage backends and provides 
-    necessary parameters for DuckDB and Arrow/Parquet to access these backends.
+    necessary parameters for DuckDB and Arrow/Parquet to access these backends,
+    or for VastDB direct access.
     
     Attributes:
-        base_path: Base path for storage (can be local or cloud URL)
+        base_path: Base path for storage (can be local or cloud URL) - ignored for VastDB
+        storage_type: Explicit storage type override ('local', 's3', 'gcs', 'azure', 'vastdb')
+        
+        # File-based storage parameters (parquet + DuckDB)
         s3_region: AWS region for S3 storage
         s3_access_key_id: AWS access key ID for S3 storage
         s3_secret_access_key: AWS secret access key for S3 storage
         gcs_project_id: Google Cloud project ID for GCS storage
         gcs_credentials: Google Cloud credentials for GCS storage
         azure_storage_connection_string: Azure storage connection string
+        
+        # VastDB parameters
+        vastdb_endpoint: VastDB cluster endpoint URL
+        vastdb_access_key: VastDB access key (S3-compatible)
+        vastdb_secret_key: VastDB secret key (S3-compatible)
+        vastdb_bucket: VastDB bucket name
+        vastdb_schema: VastDB schema name
+        vastdb_table: VastDB table name for point clouds
+        
         extra_config: Additional configuration parameters for storage
     """
-    base_path: str
+    base_path: Optional[str] = None
+    storage_type: Optional[str] = None  # Explicit storage type override
+    
+    # File-based storage parameters (parquet + DuckDB)
     s3_region: Optional[str] = None
     s3_access_key_id: Optional[str] = None
     s3_secret_access_key: Optional[str] = None
     gcs_project_id: Optional[str] = None
     gcs_credentials: Optional[Union[str, Dict[str, Any]]] = None
     azure_storage_connection_string: Optional[str] = None
+    
+    # VastDB parameters
+    vastdb_endpoint: Optional[str] = None
+    vastdb_access_key: Optional[str] = None
+    vastdb_secret_key: Optional[str] = None
+    vastdb_bucket: Optional[str] = None
+    vastdb_schema: Optional[str] = None
+    vastdb_table: str = "point_clouds"
+    
     extra_config: Dict[str, Any] = field(default_factory=dict)
     
     def __post_init__(self):
         """Validate and process storage configuration after initialization."""
-        # Parse the base path to determine storage type
-        parsed_url = urlparse(self.base_path)
-        self.storage_type = parsed_url.scheme if parsed_url.scheme else "local"
+        # Determine storage type
+        if self.storage_type is None:
+            # Auto-detect from base_path if not explicitly set
+            if self.base_path is None:
+                raise ValueError("Either storage_type must be specified or base_path must be provided")
+            parsed_url = urlparse(self.base_path)
+            self.storage_type = parsed_url.scheme if parsed_url.scheme else "local"
         
         # Validate configuration based on storage type
-        if self.storage_type == "s3":
+        if self.storage_type == "vastdb":
+            self._validate_vastdb_config()
+        elif self.storage_type == "s3":
             self._validate_s3_config()
         elif self.storage_type == "gs" or self.storage_type == "gcs":
             self._validate_gcs_config()
         elif self.storage_type == "azure" or self.storage_type == "az":
             self._validate_azure_config()
+        elif self.storage_type == "local":
+            if self.base_path is None:
+                raise ValueError("base_path is required for local storage")
+        else:
+            raise ValueError(f"Unsupported storage type: {self.storage_type}")
+    
+    def _validate_vastdb_config(self):
+        """Validate VastDB configuration."""
+        required_params = [
+            ('vastdb_endpoint', self.vastdb_endpoint),
+            ('vastdb_access_key', self.vastdb_access_key),
+            ('vastdb_secret_key', self.vastdb_secret_key),
+            ('vastdb_bucket', self.vastdb_bucket),
+            ('vastdb_schema', self.vastdb_schema)
+        ]
+        
+        for param_name, param_value in required_params:
+            if not param_value:
+                raise ValueError(f"{param_name} is required for VastDB storage")
     
     def _validate_s3_config(self):
         """Validate S3 configuration."""
@@ -110,8 +160,27 @@ class StorageConfig:
         Args:
             parser: ArgumentParser to add storage arguments to
         """
-        parser.add_argument("--base-path", type=str, required=True,
-                            help="Base path for storage (local path, s3://, gs://, or azure://)")
+        # General storage arguments
+        parser.add_argument("--storage-type", type=str, 
+                           choices=["local", "s3", "gcs", "azure", "vastdb"],
+                           help="Storage backend type (auto-detected from base-path if not specified)")
+        parser.add_argument("--base-path", type=str,
+                            help="Base path for storage (local path, s3://, gs://, or azure://) - not used for VastDB")
+        
+        # VastDB arguments
+        vastdb_group = parser.add_argument_group("VastDB Storage Options")
+        vastdb_group.add_argument("--vastdb-endpoint", type=str,
+                                 help="VastDB cluster endpoint URL")
+        vastdb_group.add_argument("--vastdb-access-key", type=str,
+                                 help="VastDB access key")
+        vastdb_group.add_argument("--vastdb-secret-key", type=str,
+                                 help="VastDB secret key")
+        vastdb_group.add_argument("--vastdb-bucket", type=str,
+                                 help="VastDB bucket name")
+        vastdb_group.add_argument("--vastdb-schema", type=str,
+                                 help="VastDB schema name")
+        vastdb_group.add_argument("--vastdb-table", type=str, default="point_clouds",
+                                 help="VastDB table name (default: point_clouds)")
         
         # S3 arguments
         s3_group = parser.add_argument_group("S3 Storage Options")
@@ -152,43 +221,63 @@ class StorageConfig:
         Raises:
             ValueError: If invalid parameter combinations are provided
         """
-        # Start with base path
-        kwargs = {"base_path": args.base_path}
+        kwargs = {}
         
-        # Determine expected storage type from base_path
-        parsed_url = urlparse(args.base_path)
-        expected_storage_type = parsed_url.scheme if parsed_url.scheme else "local"
+        # Set explicit storage type if provided
+        if hasattr(args, 'storage_type') and args.storage_type:
+            kwargs['storage_type'] = args.storage_type
         
-        # Collect provided parameters by storage type
+        # Set base path if provided (not used for VastDB)
+        if hasattr(args, 'base_path') and args.base_path:
+            kwargs['base_path'] = args.base_path
+        
+        # Collect VastDB parameters
+        vastdb_params = {}
+        if hasattr(args, 'vastdb_endpoint') and args.vastdb_endpoint:
+            vastdb_params['vastdb_endpoint'] = args.vastdb_endpoint
+        if hasattr(args, 'vastdb_access_key') and args.vastdb_access_key:
+            vastdb_params['vastdb_access_key'] = args.vastdb_access_key
+        if hasattr(args, 'vastdb_secret_key') and args.vastdb_secret_key:
+            vastdb_params['vastdb_secret_key'] = args.vastdb_secret_key
+        if hasattr(args, 'vastdb_bucket') and args.vastdb_bucket:
+            vastdb_params['vastdb_bucket'] = args.vastdb_bucket
+        if hasattr(args, 'vastdb_schema') and args.vastdb_schema:
+            vastdb_params['vastdb_schema'] = args.vastdb_schema
+        if hasattr(args, 'vastdb_table') and args.vastdb_table:
+            vastdb_params['vastdb_table'] = args.vastdb_table
+        
+        # Collect S3 parameters
         s3_params = {}
-        gcs_params = {}
-        azure_params = {}
-        extra_params = {}
-        
-        # S3 parameters
         if hasattr(args, 's3_region') and args.s3_region:
             s3_params['s3_region'] = args.s3_region
         if hasattr(args, 's3_access_key_id') and args.s3_access_key_id:
             s3_params['s3_access_key_id'] = args.s3_access_key_id
         if hasattr(args, 's3_secret_access_key') and args.s3_secret_access_key:
             s3_params['s3_secret_access_key'] = args.s3_secret_access_key
-        if hasattr(args, 's3_session_token') and args.s3_session_token:
-            extra_params['s3_session_token'] = args.s3_session_token
-        if hasattr(args, 's3_endpoint_url') and args.s3_endpoint_url:
-            extra_params['s3_endpoint_url'] = args.s3_endpoint_url
-            
-        # GCS parameters
+        
+        # Collect GCS parameters
+        gcs_params = {}
         if hasattr(args, 'gcs_project_id') and args.gcs_project_id:
             gcs_params['gcs_project_id'] = args.gcs_project_id
         if hasattr(args, 'gcs_credentials') and args.gcs_credentials:
             gcs_params['gcs_credentials'] = args.gcs_credentials
-            
-        # Azure parameters
+        
+        # Collect Azure parameters
+        azure_params = {}
         if hasattr(args, 'azure_connection_string') and args.azure_connection_string:
             azure_params['azure_storage_connection_string'] = args.azure_connection_string
         
-        # Validate parameter combinations
+        # Collect extra parameters
+        extra_params = {}
+        if hasattr(args, 's3_session_token') and args.s3_session_token:
+            extra_params['s3_session_token'] = args.s3_session_token
+        if hasattr(args, 's3_endpoint_url') and args.s3_endpoint_url:
+            extra_params['s3_endpoint_url'] = args.s3_endpoint_url
+        
+        # Check for conflicting storage parameters
         provided_storage_types = []
+        if vastdb_params:
+            provided_storage_types.append("vastdb")
         if s3_params:
             provided_storage_types.append("s3")
         if gcs_params:
@@ -196,25 +285,19 @@ class StorageConfig:
         if azure_params:
             provided_storage_types.append("azure")
         
-        # Check for conflicting storage parameters
         if len(provided_storage_types) > 1:
             raise ValueError(f"Conflicting storage parameters provided for: {', '.join(provided_storage_types)}. "
                            f"Please provide parameters for only one storage type.")
         
-        # Check if provided parameters match expected storage type
-        if provided_storage_types:
-            provided_type = provided_storage_types[0]
-            if expected_storage_type == "local" and provided_type:
-                raise ValueError(f"Local path provided but {provided_type} parameters specified. "
-                               f"Use a {provided_type}:// URL or remove {provided_type} parameters.")
-            elif expected_storage_type == "s3" and provided_type != "s3":
-                raise ValueError(f"S3 URL provided but {provided_type} parameters specified.")
-            elif expected_storage_type in ("gs", "gcs") and provided_type != "gcs":
-                raise ValueError(f"GCS URL provided but {provided_type} parameters specified.")
-            elif expected_storage_type in ("azure", "az") and provided_type != "azure":
-                raise ValueError(f"Azure URL provided but {provided_type} parameters specified.")
+        # If storage type is explicitly set, validate it matches provided parameters
+        if 'storage_type' in kwargs:
+            explicit_type = kwargs['storage_type']
+            if provided_storage_types and explicit_type not in provided_storage_types:
+                raise ValueError(f"Explicit storage type '{explicit_type}' conflicts with "
+                               f"provided parameters for: {', '.join(provided_storage_types)}")
         
         # Add the appropriate parameters
+        kwargs.update(vastdb_params)
         kwargs.update(s3_params)
         kwargs.update(gcs_params)
         kwargs.update(azure_params)
