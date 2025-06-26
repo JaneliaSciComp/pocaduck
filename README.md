@@ -2,16 +2,43 @@
 
 PoCADuck is a library for efficiently storing and retrieving vast numbers of point clouds indexed by `uint64` labels. The name stands for:
 - **PoC**: Point Clouds — the core payload
-- **A**: Arrow — using the Arrow ecosystem for storage (Parquet and perhaps Arrow IPC)
-- **Duck**: DuckDB — for label & block indexing
+- **A**: Arrow — using the Arrow ecosystem for storage (Parquet or VastDB)
+- **Duck**: DuckDB — for label & block indexing if using Parquet
 
 ## Features
 
-- Efficiently ingest 3D point clouds for labels in a blockwise fashion
+- Simple query API of label-specific n-dimensional point clouds
+- Provides choice of file-based (Parquet) or VastDB backend
+
+### File-based Parquet + DuckDB backend
+
+```
+User Query → DuckDB Index → Parquet Files → Point Cloud Data
+              ↑              ↑
+         Complex indexing   File management
+         Optimization       Worker sharding
+         pipeline          
+```
+
+- Efficiently ingest n-dimensional point clouds for labels in a blockwise fashion
 - Parallelizable ingestion with worker-specific storage
+- Greatly reduces # of files by storing point clouds into large shard files
 - Automatically aggregate point clouds across blocks during retrieval
-- Support for local and cloud storage (S3, GCS, Azure)
+- Support for local (tested) and cloud storage (untested S3, GCS, Azure)
 - Efficient queries using DuckDB's indexing capabilities
+
+### VastDB backend
+
+```
+User Query → VastDB SQL → Point Cloud Data
+                ↑
+         Simple key-value lookup
+         No optimization needed
+```
+
+- Removes necessity for sharded data storage of point clouds due to object capacity
+- May still require sharding if ingesting through scanning label volumes
+- Ingestion from DVID can bypass sharding since sparse volumes are supported
 
 ## Installation
 
@@ -36,6 +63,15 @@ First, configure your storage backend:
 
 ```python
 from pocaduck import StorageConfig
+
+# VastDB
+config = StorageConfig(
+    vastdb_endpoint="http://your-vastdb-endpoint",
+    vastdb_access_key="your-access-key",
+    vastdb_secret_key="your-secret-key",
+    vastdb_bucket="neuron-data",
+    vastdb_schema="point_clouds"
+)
 
 # Local storage
 config = StorageConfig(base_path="/path/to/data")
