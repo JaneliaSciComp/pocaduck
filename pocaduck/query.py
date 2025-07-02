@@ -60,6 +60,11 @@ class VastDBQueryBackend:
         self.schema = self.bucket.schema(storage_config.vastdb_schema)
         self.table = self.schema.table(storage_config.vastdb_table)
     
+    def setup(self, **kwargs):
+        """Setup VastDB backend (create schema and table if needed)."""
+        from .setup import setup_vastdb
+        setup_vastdb(self.storage_config, **kwargs)
+    
     def get_labels(self) -> np.ndarray:
         """Get all available labels."""
         result = self.table.select(columns=['label'])
@@ -141,7 +146,24 @@ class VastDBQueryBackend:
             if points_list is None or len(points_list) == 0:
                 return np.array([], dtype=np.int64).reshape(0, -1)  # n-dimensional empty array
             
-            return np.array(points_list, dtype=np.int64)
+            # Points are stored flattened, need to reshape back to (N, D) format
+            # Assume common dimensions (3D or 4D), but handle variable dimensions
+            points_array = np.array(points_list, dtype=np.int64)
+            if len(points_array) == 0:
+                return points_array.reshape(0, -1)
+            
+            # Try to determine dimension from point count
+            # Common cases: 3D (x,y,z) or 4D (x,y,z,supervoxel)
+            total_points = len(points_array)
+            if total_points % 3 == 0:
+                # Assume 3D points
+                return points_array.reshape(-1, 3)
+            elif total_points % 4 == 0:
+                # Assume 4D points
+                return points_array.reshape(-1, 4)
+            else:
+                # Fall back to original flattened array
+                return points_array.reshape(-1, 1)
         
         # Timing version
         start_time = time.time()
@@ -160,7 +182,22 @@ class VastDBQueryBackend:
             if points_list is None or len(points_list) == 0:
                 points = np.array([], dtype=np.int64).reshape(0, -1)  # n-dimensional empty array
             else:
-                points = np.array(points_list, dtype=np.int64)
+                # Points are stored flattened, need to reshape back to (N, D) format
+                points_array = np.array(points_list, dtype=np.int64)
+                if len(points_array) == 0:
+                    points = points_array.reshape(0, -1)
+                else:
+                    # Try to determine dimension from point count
+                    total_points = len(points_array)
+                    if total_points % 3 == 0:
+                        # Assume 3D points
+                        points = points_array.reshape(-1, 3)
+                    elif total_points % 4 == 0:
+                        # Assume 4D points
+                        points = points_array.reshape(-1, 4)
+                    else:
+                        # Fall back to original flattened array
+                        points = points_array.reshape(-1, 1)
         processing_time = time.time() - processing_start
         
         timing_info = {
@@ -252,6 +289,10 @@ class ParquetDuckDBQueryBackend:
 
         # Initialize database connection
         self.db_connection = self._initialize_db_connection()
+    
+    def setup(self, **kwargs):
+        """Setup method for file-based backend (no-op)."""
+        pass
         
         # Initialize point cloud cache for frequently queried labels
         self._points_cache = {}  # Maps label to point cloud data
@@ -808,6 +849,10 @@ class Query:
     def get_points(self, label: int, use_cache: bool = True, timing: bool = False) -> Union[np.ndarray, Tuple[np.ndarray, Dict]]:
         """Get all point data for a specific label."""
         return self._backend.get_points(label, use_cache, timing)
+    
+    def setup(self, **kwargs):
+        """Setup the backend (create schema/tables if needed)."""
+        return self._backend.setup(**kwargs)
     
     def close(self):
         """Close the query connection and clear caches."""

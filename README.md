@@ -59,7 +59,8 @@ pip install -e .
 
 ### Storage Configuration
 
-First, configure your storage backend:
+First, configure your storage backend. Note that any access or secret keys
+should be environment variables read into your python client configuration code.
 
 ```python
 from pocaduck import StorageConfig
@@ -70,7 +71,8 @@ config = StorageConfig(
     vastdb_access_key="your-access-key",
     vastdb_secret_key="your-secret-key",
     vastdb_bucket="neuron-data",
-    vastdb_schema="point_clouds"
+    vastdb_schema="point_clouds",
+    vastdb_table="my_table"
 )
 
 # Local storage

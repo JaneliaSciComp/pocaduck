@@ -15,27 +15,217 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import duckdb
 from pathlib import Path
+from collections import defaultdict
 
 from .storage_config import StorageConfig
+
+try:
+    import vastdb
+    VASTDB_AVAILABLE = True
+except ImportError:
+    VASTDB_AVAILABLE = False
+
+
+class VastDBIngestorBackend:
+    """
+    VastDB-based backend for point cloud ingestion with batching.
+    
+    This backend accumulates points in memory and performs batch inserts to VastDB
+    when the batch size is reached or when finalize() is called.
+    """
+    
+    def __init__(self, storage_config: StorageConfig, batch_size: int = 1000, verbose: bool = False):
+        """
+        Initialize VastDB ingestion backend.
+        
+        Args:
+            storage_config: Storage configuration with VastDB parameters
+            batch_size: Number of rows to batch before inserting
+            verbose: Whether to output detailed logging
+        """
+        if not VASTDB_AVAILABLE:
+            raise ImportError("VastDB SDK is not available. Please install vastdb package.")
+        
+        self.storage_config = storage_config
+        self.batch_size = batch_size
+        self.verbose = verbose
+        
+        # Set up logging
+        import logging
+        self.logger = logging.getLogger(__name__)
+        
+        # Connect to VastDB
+        self.session = vastdb.connect(
+            endpoint=storage_config.vastdb_endpoint,
+            access=storage_config.vastdb_access_key,
+            secret=storage_config.vastdb_secret_key
+        )
+        
+        # Get references to bucket, schema, and table
+        self.bucket = self.session.bucket(storage_config.vastdb_bucket)
+        self.schema = self.bucket.schema(storage_config.vastdb_schema)
+        self.table = self.schema.table(storage_config.vastdb_table)
+        
+        # Batching state - accumulate by label across all blocks
+        # Each label gets aggregated across blocks into a single row
+        self._batch_data = defaultdict(list)  # label -> list of (block_id, points) tuples
+        self._batch_count = 0
+    
+    def write(self, label: int, block_id: str, points: np.ndarray) -> None:
+        """
+        Write point cloud data for a label within a block.
+        
+        Points are accumulated in memory until batch_size is reached or finalize() is called.
+        
+        Args:
+            label: The uint64 label identifier
+            block_id: Identifier for the block containing the points
+            points: Numpy array of shape (N, D) containing point data
+        """
+        # Validate input
+        if not isinstance(points, np.ndarray) or points.ndim != 2:
+            raise ValueError("Points must be a numpy array of shape (N, D) containing point data")
+        
+        num_points = points.shape[0]
+        if num_points == 0:
+            return  # Skip empty point clouds
+        
+        # Add to batch - store points flattened for Arrow list format
+        flattened_points = points.flatten().astype(np.int64)
+        self._batch_data[label].append((block_id, flattened_points))
+        self._batch_count += 1
+        
+        if self.verbose:
+            self.logger.info(f"Accumulated {len(flattened_points)} points for label {label}, block {block_id} (batch count: {self._batch_count})")
+        
+        # Flush if batch size reached
+        if self._batch_count >= self.batch_size:
+            self._flush_batch()
+    
+    def _flush_batch(self) -> None:
+        """Flush the current batch to VastDB."""
+        if not self._batch_data:
+            return
+        
+        if self.verbose:
+            self.logger.info(f"Flushing batch with {len(self._batch_data)} labels")
+        
+        # Prepare Arrow table data
+        labels = []
+        block_ids = []  
+        points_lists = []
+        
+        for label, block_point_pairs in self._batch_data.items():
+            # Aggregate all points for this label across blocks
+            all_points = []
+            all_block_ids = []
+            
+            for block_id, points in block_point_pairs:
+                all_points.extend(points)
+                all_block_ids.append(block_id)
+            
+            # Create single row for this label with aggregated points
+            labels.append(label)
+            # For MVP: use first block_id, but could be comma-separated list
+            block_ids.append(all_block_ids[0] if all_block_ids else "")  
+            points_lists.append(all_points)
+        
+        # Create Arrow table
+        arrow_table = pa.table({
+            'label': pa.array(labels, type=pa.uint64()),
+            'block_id': pa.array(block_ids, type=pa.string()),
+            'points': pa.array(points_lists, type=pa.list_(pa.int64()))
+        })
+        
+        # Insert batch using VastDB transaction
+        with self.session.transaction() as tx:
+            self.table.insert(arrow_table)
+            if self.verbose:
+                self.logger.info(f"Inserted batch of {len(labels)} labels to VastDB")
+        
+        # Clear batch
+        self._batch_data.clear()
+        self._batch_count = 0
+    
+    def finalize(self) -> None:
+        """Final flush and cleanup."""
+        self._flush_batch()
+        if self.verbose:
+            self.logger.info("VastDB ingestion finalized")
 
 
 class Ingestor:
     """
-    Handles ingestion of point clouds for labels within blocks.
+    Unified interface for ingesting point clouds using different backends.
+    
+    The Ingestor class provides a consistent API for writing point clouds to different
+    storage backends:
+    - VastDB: Direct Arrow-based ingestion with batching
+    - Parquet+DuckDB: File-based storage with worker coordination
+    
+    The backend is automatically selected based on the storage_config.storage_type.
+    """
+    
+    def __init__(
+        self,
+        storage_config: StorageConfig,
+        worker_id: Union[str, int] = 0,
+        max_points_per_file: int = 10_000_000,
+        verbose: bool = False,
+        batch_size: int = 1000,
+    ):
+        """
+        Initialize an Ingestor instance with the appropriate backend.
 
-    The Ingestor class provides methods to write 3D point clouds associated with labels
-    within blocks and to finalize the ingestion process. Each worker should have its own
-    Ingestor instance.
+        Args:
+            storage_config: Configuration for storage backend.
+            worker_id: Unique identifier for the worker (file-based backends only).
+            max_points_per_file: Maximum number of points to store in a single parquet file (file-based backends only).
+            verbose: Whether to output detailed logging information during operations.
+            batch_size: Number of rows to batch before inserting (VastDB backend only).
+        """
+        self.storage_config = storage_config
+        
+        # Select the appropriate backend based on storage type
+        if storage_config.storage_type == "vastdb":
+            self._backend = VastDBIngestorBackend(storage_config, batch_size, verbose)
+        elif storage_config.storage_type in ["local", "s3", "gcs", "azure"]:
+            # Create the original file-based implementation
+            self._backend = self._create_file_backend(storage_config, worker_id, max_points_per_file, verbose)
+        else:
+            raise ValueError(f"Unsupported storage type: {storage_config.storage_type}")
+    
+    def _create_file_backend(self, storage_config, worker_id, max_points_per_file, verbose):
+        """Create file-based backend by embedding the original implementation."""
+        # For now, use the existing file-based logic inline
+        # This preserves backward compatibility
+        return ParquetDuckDBIngestorBackend(storage_config, worker_id, max_points_per_file, verbose)
+    
+    # Delegate methods to backend
+    def write(self, label: int, block_id: str, points: np.ndarray) -> None:
+        """Write point cloud data for a label within a block."""
+        return self._backend.write(label, block_id, points)
+    
+    def finalize(self) -> None:
+        """Finalize ingestion and close connections."""
+        return self._backend.finalize()
+    
+    @staticmethod
+    def consolidate_indexes(storage_config: StorageConfig) -> None:
+        """Consolidate worker indexes (file-based backends only)."""
+        if storage_config.storage_type in ["local", "s3", "gcs", "azure"]:
+            ParquetDuckDBIngestorBackend.consolidate_indexes(storage_config)
+        else:
+            # VastDB doesn't need index consolidation
+            pass
 
-    Attributes:
-        storage_config: Configuration for storage backend.
-        worker_id: Unique identifier for the worker.
-        max_points_per_file: Maximum number of points to store in a single parquet file.
-        current_points_count: Current count of points written to the current parquet file.
-        file_counter: Counter to track the file number for sequential naming.
-        current_file_path: Path to the current parquet file being written.
-        current_file_df: In-memory DataFrame cache for the current file.
-        db_connection: Connection to the DuckDB database for indexing.
+
+class ParquetDuckDBIngestorBackend:
+    """
+    File-based backend for point cloud ingestion.
+    
+    This is the original implementation using parquet files for storage
+    and DuckDB for indexing.
     """
     
     def __init__(
@@ -46,23 +236,22 @@ class Ingestor:
         verbose: bool = False,
     ):
         """
-        Initialize an Ingestor instance.
+        Initialize file-based ingestion backend.
 
         Args:
             storage_config: Configuration for storage backend.
             worker_id: Unique identifier for the worker.
             max_points_per_file: Maximum number of points to store in a single parquet file.
             verbose: Whether to output detailed logging information during operations.
-                    Default is False for reduced output in production environments.
         """
         self.storage_config = storage_config
         self.worker_id = str(worker_id)
         self.max_points_per_file = max_points_per_file
         self.current_points_count = 0
-        self.file_counter = 0  # Counter to track the file number for sequential naming
-        self.current_file_path = None  # Path to the current parquet file
-        self.current_file_df = None    # DataFrame cache for the current file
-        self.verbose = verbose         # Whether to output detailed logging
+        self.file_counter = 0
+        self.current_file_path = None
+        self.current_file_df = None
+        self.verbose = verbose
 
         # Set up logging
         import logging
