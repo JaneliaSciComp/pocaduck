@@ -166,17 +166,17 @@ PoCADuck follows an architecture with two main components:
 1. **Ingestion**:
    - Multiple workers process blocks independently
    - Each worker writes point clouds for labels within blocks
-   - Workers maintain local indexes for fast lookup
-   - Indexes are consolidated after ingestion
+   - Workers maintain local indexes for fast lookup (only Parquet+DuckDB backend) 
+   - Indexes are consolidated after ingestion (only Parquet+DuckDB backend) 
 
 2. **Querying**:
    - Unified index allows fast lookup by label
    - Automatically aggregates points across all blocks
-   - Efficient filtering and retrieval using DuckDB
+   - Efficient filtering and retrieval using DuckDB or VastDB depending on backend.
 
 ## Performance Optimization
 
-For large datasets where labels are scattered across many worker files, PoCADuck provides an optimization pipeline that reorganizes data by label for significantly faster retrieval.
+For large datasets on file-based storage systems, labels can be scattered across many worker files. PoCADuck provides an optimization pipeline that reorganizes data by label for significantly faster retrieval.  This step is not needed for the VastDB backend.
 
 ### How It Works
 
