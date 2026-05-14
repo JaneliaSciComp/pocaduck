@@ -2,16 +2,20 @@
 
 PoCADuck is a library for efficiently storing and retrieving vast numbers of point clouds indexed by `uint64` labels. The name stands for:
 - **PoC**: Point Clouds — the core payload
-- **A**: Arrow — using the Arrow ecosystem for storage (Parquet and perhaps Arrow IPC)
-- **Duck**: DuckDB — for label & block indexing
+- **A**: Apache Parquet — the on-disk format for the points themselves (written via pandas, which uses PyArrow as its engine)
+- **Duck**: DuckDB — used both for the label/block index and for reading points back out of Parquet
 
 ## Features
 
-- Efficiently ingest 3D point clouds for labels in a blockwise fashion
-- Parallelizable ingestion with worker-specific storage
-- Automatically aggregate point clouds across blocks during retrieval
-- Support for local and cloud storage (S3, GCS, Azure)
-- Efficient queries using DuckDB's indexing capabilities
+- Ingest point clouds for labels in a blockwise fashion. Each `write()` accepts an `(N, D)` integer array — `D` is not constrained to 3, so additional per-point attributes can ride alongside coordinates.
+- Parallelizable ingestion: each worker writes to its own subdirectory and its own DuckDB index file; a separate `consolidate_indexes()` step merges those indexes into one.
+- Retrieval automatically aggregates a label's points across all blocks/files it lives in.
+- Optional offline optimization pass that reorganizes points by label into larger Parquet files for faster queries (often 10–100×).
+- DuckDB-backed indexing with an in-memory LRU cache for recently fetched labels.
+
+## Storage backends
+
+Local filesystems are the supported, tested target. `StorageConfig` accepts S3, GCS, and Azure parameters and forwards them to DuckDB, which lets the **read** path scan Parquet files directly out of object storage. However, the **ingest** and **optimize** pipelines currently call local-filesystem APIs (`os.makedirs`, `os.path.exists`, `pandas.DataFrame.to_parquet` against bare paths) and have not been exercised against cloud paths — treat cloud-storage ingestion as unimplemented for now. A second backend targeting Vast Data's VastDB is in development on the `dev` branch and is the next-priority storage target; cloud-storage ingestion is queued behind it. See the [Roadmap](#roadmap) for details.
 
 ## Installation
 
@@ -58,9 +62,9 @@ gcs_config = StorageConfig(
 
 ### Point Cloud Ingestion
 
-Each worker is given a non-overlapping sets of blocks and create
-an Ingestor with common storage configuration, e.g., if local storage
-is used, the workers share a common data directory.
+Each worker is given a non-overlapping set of blocks and creates an
+Ingestor with the shared storage configuration. All workers must point
+at the same `base_path` so the consolidation step can find their indexes.
 
 ```python
 from pocaduck import Ingestor
@@ -69,12 +73,14 @@ import numpy as np
 # Create an ingestor for a specific worker
 ingestor = Ingestor(storage_config=config, worker_id="worker1")
 
-# Write point clouds for each label in a block
+# Write point clouds for each label in a block.
+# `points` is an (N, D) integer array. Returned points come back as np.int64,
+# so float coordinates will be truncated — pre-quantize voxel coordinates
+# yourself before writing.
 label = 12345
 block_id = "block_x1_y2_z3"
-points = np.random.rand(1000, 3) * 100  # Random 3D points
+points = np.random.randint(0, 1024, size=(1000, 3), dtype=np.int64)
 
-# Write the points
 ingestor.write(label=label, block_id=block_id, points=points)
 
 # The worker continues writing points across blocks...
@@ -82,6 +88,19 @@ ingestor.write(label=label, block_id=block_id, points=points)
 # Then finalize when finished writing for that worker.
 ingestor.finalize()
 ```
+
+#### What ingestion writes to disk
+
+Per worker (under `{base_path}/worker_{worker_id}/`):
+
+- `data/{worker_id}-{N}.parquet` — Parquet files with three columns:
+  `label BIGINT`, `block_id VARCHAR`, `data` (a list column where each row
+  is one point's coordinate tuple). New files roll over once
+  `max_points_per_file` (default 10M points) is reached.
+- `index_{worker_id}.db` — a DuckDB database with one table,
+  `point_cloud_index(label UBIGINT, block_id VARCHAR, file_path VARCHAR, point_count UBIGINT)`.
+  One row per `(label, block_id, file_path)` write — a single label/block
+  may have multiple rows if its points were split across files.
 
 When all workers have finished writing and called `ingestor.finalize()`,
 we consolidate the workers' indices into one index.
@@ -93,48 +112,62 @@ Ingestor.consolidate_indexes(config)
 
 ### Querying Point Clouds
 
-Query point clouds across all blocks:
+Query point clouds across all blocks. The DuckDB index is opened in
+read-only mode, so multiple concurrent `Query` instances are safe.
 
 ```python
 from pocaduck import Query
 
-# Create a query object
-query = Query(storage_config=config)
+# Create a query object. If `{base_path}/optimized/optimized_index.db`
+# exists, it is used automatically; otherwise the unconsolidated
+# `{base_path}/unified_index.db` is used.
+query = Query(storage_config=config, cache_size=10)
 
-# Get all available labels
+# All unique labels in the index.
 labels = query.get_labels()
-print(f"Available labels: {labels}")
 
-# Get point count for a label
+# Total point count across every block/file for one label.
 point_count = query.get_point_count(label=12345)
-print(f"Label 12345 has {point_count} points")
 
-# Get all blocks containing a label
+# Block IDs that contain a label. NOTE: the optimization step drops
+# block_id, so this returns [] when the optimized index is in use.
 blocks = query.get_blocks_for_label(label=12345)
-print(f"Label 12345 is in blocks: {blocks}")
 
-# Get all points for a label (aggregated across all blocks)
+# Aggregated points for a label, returned as an (N, D) np.int64 array.
 points = query.get_points(label=12345)
-print(f"Retrieved {points.shape[0]} points for label 12345")
 
-# Close the query connection when done
 query.close()
 ```
 
+**Deduplication caveat.** When reading from the unoptimized index,
+`get_points()` applies `np.unique` so duplicate coordinates collapse.
+When reading from the optimized index, no deduplication runs at query
+time — instead, the optimizer dedupes once when it builds the optimized
+files. If you mix workflows or skip optimization on data with overlapping
+writes, expect those two code paths to return different row counts.
+
 ## Architecture
 
-PoCADuck follows an architecture with two main components:
+PoCADuck has two required stages and one optional one:
 
-1. **Ingestion**:
-   - Multiple workers process blocks independently
-   - Each worker writes point clouds for labels within blocks
-   - Workers maintain local indexes for fast lookup
-   - Indexes are consolidated after ingestion
+1. **Ingestion** (`Ingestor`): Many workers run in parallel, each writing
+   to its own `worker_{id}/data/*.parquet` files and its own
+   `index_{id}.db`. Inside a worker, points accumulate in an in-memory
+   pandas DataFrame and flush to a single Parquet file per
+   `max_points_per_file`-sized chunk. Each `(label, block_id, file)` write
+   becomes one row in the worker's DuckDB index.
 
-2. **Querying**:
-   - Unified index allows fast lookup by label
-   - Automatically aggregates points across all blocks
-   - Efficient filtering and retrieval using DuckDB
+2. **Index consolidation** (`Ingestor.consolidate_indexes`): After every
+   worker has called `finalize()`, this static method scans
+   `worker_*/index_*.db`, pulls all rows out of each, and inserts them
+   into a single `{base_path}/unified_index.db` with the same schema. The
+   underlying Parquet files are not touched — only the index is merged.
+
+3. **Optional optimization** (`optimize_point_cloud.py`): Reorganizes
+   the Parquet payload so each label's points live together in a small
+   number of files, dropping the `block_id` dimension. Output goes under
+   `{base_path}/optimized/`, and `Query` switches to it transparently
+   when the optimized index is present.
 
 ## Performance Optimization
 
@@ -143,9 +176,11 @@ For large datasets where labels are scattered across many worker files, PoCADuck
 ### How It Works
 
 The optimization process:
-1. Reads point data from the original structure
-2. Reorganizes points by label into optimized parquet files
-3. Creates a new optimized index for efficient label-based lookups
+1. Reads point data from the original structure (in batches of `--batch-size` labels at a time).
+2. Deduplicates each label's points and groups them by label into new Parquet files of approximately `--target-file-size` bytes.
+3. Builds a new index `optimized_index.db` whose schema drops `block_id`: `point_cloud_index(label BIGINT, file_path VARCHAR, point_count BIGINT)`, plus a `CREATE INDEX idx_label`.
+
+Because `block_id` is dropped, `Query.get_blocks_for_label()` returns `[]` once the optimized index is in use. If you need block provenance, query before running optimization (or keep the unconsolidated worker indexes around).
 
 The optimized data is stored in a standard directory structure:
 ```
@@ -206,8 +241,8 @@ python optimize_point_cloud.py --action consolidate --base-path /path/to/data
 
 - Significantly faster retrieval for label-based queries (often 10-100x speedup)
 - Reduced disk I/O by consolidating each label's data
-- Automatic deduplication of points
-- Transparent integration - no code changes needed for existing applications
+- Automatic deduplication of points (applied once during optimization, rather than on every read as the unoptimized path does)
+- Transparent integration — `Query` auto-detects `optimized/optimized_index.db` and uses it without code changes
 
 ## Performance Analysis and Debugging
 
@@ -259,6 +294,31 @@ total_time = timing['total_time']
 if files_accessed > 10:
     print("Consider running optimization pipeline")
 ```
+
+## Roadmap
+
+### 1. VastDB backend (next priority)
+
+A second backend targeting [Vast Data's VastDB](https://vastdata.com/) is in  development on the `dev` branch targeting Janelia's internal VAST storage system. The motivation is that VastDB's transactional, columnar SQL model lets us replace the entire `Parquet files + DuckDB index + offline optimization pipeline` stack with a single keyed lookup:
+
+```
+File-based backend (today):       VastDB backend (planned):
+  Query → DuckDB index              Query → VastDB SQL → points
+        → Parquet scan(s)
+        → point cloud
+```
+
+Detailed status (what already exists on `dev`, what's left before merge) lives alongside that branch's other VastDB design notes — see `roadmap_vastdb.md` on `dev`.
+
+### 2. Cloud object-store ingestion (later)
+
+Today, `StorageConfig` accepts S3 / GCS / Azure parameters and the `Query` path's DuckDB connection can in principle scan Parquet directly out of object storage, but ingestion and the optimization pipeline only work against local filesystems (see "Storage backends" above). Closing that gap — wrapping the local FS calls in a small filesystem abstraction (e.g. `fsspec`) and adding round-trip tests against a MinIO or fake-GCS container — is queued **after** the VastDB backend lands. For Janelia workloads the VastDB path is the more useful next step; for external users we expect cloud ingestion to be the natural follow-up.
+
+### 3. Smaller follow-ups
+
+- Resumable/incremental optimizer workers (today an interrupted worker has to be restarted from scratch).
+- Optional float-coordinate support, or a clearer error when float arrays are passed (currently they get silently truncated to `int64`).
+- Surface `get_blocks_for_label`'s "returns `[]` on optimized data" caveat as a typed return (`None` or a sentinel) rather than an empty list, so callers can distinguish "no blocks" from "block info dropped."
 
 ## Testing
 

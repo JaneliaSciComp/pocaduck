@@ -6,10 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 PoCADuck is a library for efficiently storing and retrieving vast numbers of point clouds indexed by `uint64` labels. The name stands for:
 - **PoC**: Point Clouds — the core payload
-- **A**: Arrow — using Arrow IPC or Parquet for storage
-- **Duck**: DuckDB — for label & block indexing
+- **A**: Apache Parquet — written via `pandas.DataFrame.to_parquet` (PyArrow engine). Arrow IPC is **not** used despite the name suggesting it might be.
+- **Duck**: DuckDB — both the label/block index store and the read engine that scans Parquet files at query time
 
-The library handles ingestion of point clouds while scanning large 3D label volumes (e.g., 3D neuron segmentation volumes) and retrieval of complete point clouds for any label across all blocks.
+The library handles ingestion of point clouds while scanning large 3D label volumes (e.g., 3D neuron segmentation volumes) and retrieval of complete point clouds for any label across all blocks. Although the typical use case is 3D coordinates, `Ingestor.write` accepts any `(N, D)` integer array — D is not constrained to 3.
 
 ## Architecture
 
@@ -26,9 +26,8 @@ The library handles ingestion of point clouds while scanning large 3D label volu
 - Uses the unified DuckDB index for lookups
 
 ### Storage
-- Uses DuckDB for native I/O to local and cloud storage
-- Handles parquet file storage
-- Supports paths and credentials for cloud access
+- Local filesystem is the supported, tested target for ingestion, optimization, and querying.
+- Cloud backends (S3, GCS, Azure): `StorageConfig` validates credentials and forwards them to every DuckDB connection the library opens, so DuckDB-side reads (the query path's `parquet_scan`) can in principle run against object storage. The ingest and optimize code paths, however, use local FS APIs (`os.makedirs`, `os.path.exists`, `os.path.getsize`, `pandas.to_parquet`/`read_parquet` against bare paths) and do not currently work against cloud paths. Treat cloud support as read-side / partial.
 
 ## Core Components
 
@@ -104,6 +103,8 @@ Example code is available in the `examples/` directory:
 
 ### Parquet Storage
 
-- The library generates UUIDs for parquet files and tracks their locations
-- When writing points, it manages file size and creates new files as needed
-- Point clouds are stored efficiently with label, block_id, x, y, z columns
+- Worker-stage Parquet files are named `{worker_id}-{N}.parquet` (sequential per worker, not UUID-based; UUIDs are only used for the optimized output files).
+- File size is bounded by `max_points_per_file` (default 10M points). When the running point count would exceed it, the in-memory pandas DataFrame is flushed to disk and a new file is started.
+- Point clouds are stored as three columns: `label` (int64), `block_id` (string), and `data` (a list-typed column where each row is one point's coordinate tuple). They are *not* stored as separate `x`, `y`, `z` columns.
+- All retrieved points are returned as `np.int64`; floating-point coordinate inputs will be silently truncated.
+- The unoptimized read path runs `np.unique` to dedupe; the optimized read path does not (the optimizer dedupes once at build time instead).

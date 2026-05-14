@@ -1,32 +1,61 @@
 ## PoCADuck Overview
 
-PPoCADuck is a library for efficiently storing and retrieving vast numbers of point clouds indexed by `uint64` labels. It efficiently handles ingestion of the point clouds while scanning large 3d label volumes (e.g., 3d neuron segmentation volumes) by allowing writes of points clouds for different labels within each block of the much larger volume. It efficiently handles retrieval of the full point cloud of a label across all written blocks for that label.
+PoCADuck is a library for efficiently storing and retrieving vast numbers of point clouds indexed by `uint64` labels. It is built for the workflow of scanning a large 3D label volume (e.g., a neuron segmentation) blockwise: many parallel workers each emit per-label point sets for the blocks they own, and at query time the library aggregates a label's points back across every block that contained it.
 
 | Element     | Meaning |
 |-------------|--------|
 | **PoC**     | Point Clouds — the core payload |
-| **A**       | Arrow — either Arrow IPC or Parquet |
-| **Duck**    | DuckDB — label & block indexing engine |
+| **A**       | Apache **Parquet** — the on-disk format, written via `pandas.DataFrame.to_parquet` (PyArrow engine). Arrow IPC is *not* used. |
+| **Duck**    | DuckDB — label/block index *and* the read engine that scans Parquet files on retrieval |
 
 
 ## Approach
 
-The pocaduck library can be used with many parallel workers that scan a large segmentation volume, generating point clouds for each label in a blockwise fashion. 
-
 ### Ingestion
 
-The pocaduck library provides an ingestion object initialized with a worker ID and a path to a data directory or cloud storage bucket. For each block, a worker uses the `ingestor.write()` to write sets of 3d coordinates associated with each label in the block. The library handles consolidation of the many sets of 3d coordinates across all the blocks into relatively few parquet files, creating new parquet files as needed when the written data exceeds a settable parquet file size.
+Each worker constructs an `Ingestor(storage_config, worker_id)`, which lays out:
 
-So for each worker, we have a set of parquet files containing 3d point clouds associated with labels and their originating block. Also, each worker has a DuckDB `.db` file that stores the location of the 3d point cloud for any given label in a block. 
+- `{base_path}/worker_{worker_id}/data/{worker_id}-{N}.parquet` — point payload
+- `{base_path}/worker_{worker_id}/index_{worker_id}.db` — DuckDB index
 
-At the end of ingestion across all workers, pocaduck reads in the worker-specific DuckDB index and concatenates them into one unified DuckDB index.
+`ingestor.write(label, block_id, points)` accepts an `(N, D)` numpy integer array. The library is not hard-wired to D=3; D can include extra per-point attributes. Internally:
+
+1. The current Parquet file is held as an in-memory `pandas.DataFrame` with columns `label` (int64), `block_id` (str), and `data` (a list-typed column where each row is one point's coordinate tuple).
+2. When the running point count would exceed `max_points_per_file` (default 10M), the DataFrame is flushed to a `.parquet` file and a new file is opened.
+3. Every flush produces one or more rows in the worker's DuckDB table `point_cloud_index(label UBIGINT, block_id VARCHAR, file_path VARCHAR, point_count UBIGINT)`. The same `(label, block_id)` may appear multiple times if its points were split across files.
+
+After a worker calls `ingestor.finalize()`, its Parquet files and `.db` are committed and closed.
+
+### Index consolidation
+
+`Ingestor.consolidate_indexes(storage_config)` is a static method that scans `{base_path}/worker_*/index_*.db`, opens each worker DB, copies all rows out, and inserts them into `{base_path}/unified_index.db` with the same schema. Only the index is merged; the Parquet payload files stay where the workers wrote them.
 
 ### Querying
 
-The pocaduck library provides a query object initialized with the same path above used in the ingestion process. The query object allows retrieval of the 3d point cloud for any label, automatically aggregating the 3d coordinates across all blocks.
+`Query(storage_config)` opens the unified index (read-only) and routes `get_points(label)` through DuckDB:
 
-Under the hood, pocaduck uses the unified DuckDB index created at the end of the ingestion process.
+```sql
+SELECT data
+FROM parquet_scan(['…file1.parquet', '…file2.parquet', …])
+WHERE label = ?
+```
+
+The list of files is determined by an index lookup on `label`. Result rows (each a per-point list) are stacked into an `(N, D) np.int64` array and `np.unique`'d to dedupe.
+
+A small in-memory LRU cache (default size 10) holds recently fetched label point clouds to short-circuit repeat queries.
+
+### Optional optimization pass
+
+`optimize_point_cloud.py` reorganizes data so a single label's points are contiguous on disk:
+
+- Output goes under `{base_path}/optimized/optimize_{worker_id}/optimized_*.parquet`.
+- The new index `{base_path}/optimized/optimized_index.db` has schema `point_cloud_index(label BIGINT, file_path VARCHAR, point_count BIGINT)` — note that **`block_id` is dropped**.
+- Deduplication is applied here, once, rather than on every read.
+- `Query` auto-detects this directory and prefers the optimized index over `unified_index.db`. As a consequence, `Query.get_blocks_for_label()` returns `[]` once the optimized index is in use.
+
+The optimizer is parallelizable via the `shard` / `optimize` / `consolidate` action flow described in the README.
 
 ### Storage handling
 
-DuckDB natively handles I/O to both local and cloud storage. It also is used to store parquet files. Paths and credentials for cloud access can be passed into both ingestion and query objects.
+- **Local filesystems** are the supported and tested backend for ingest, optimize, and query.
+- **Cloud storage (S3/GCS/Azure)**: `StorageConfig` validates the relevant credentials and emits the corresponding `SET …='…'` statements for any DuckDB connection the library opens. This means DuckDB-side operations (the query path's `parquet_scan`) can in principle read directly from object storage. However, the ingestion and optimization code uses local-filesystem APIs (`os.makedirs`, `os.path.exists`, `os.path.getsize`, `pandas.to_parquet`, `pandas.read_parquet` against bare paths) and is not wired up for cloud writes. Cloud-storage support is best regarded as partial / read-side until that gap is closed.
