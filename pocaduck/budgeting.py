@@ -83,6 +83,38 @@ def _validate_soma_parameters(
     return threshold, fraction
 
 
+def validate_gross_budgeting_parameters(
+    budget: int,
+    voxel_size: Sequence[float],
+    *,
+    soma_threshold: float = DEFAULT_SOMA_THRESHOLD,
+    sampling_fraction: Optional[float] = None,
+) -> tuple[int, np.ndarray, float, Optional[float]]:
+    """Validate and normalize strategy parameters for either retrieval pass."""
+
+    validated_budget = _validate_budget(budget)
+    pitches = _validate_voxel_size(voxel_size)
+    threshold, fraction = _validate_soma_parameters(
+        soma_threshold, sampling_fraction
+    )
+    return validated_budget, pitches, threshold, fraction
+
+
+def _validate_points(
+    points: np.ndarray, pitches: np.ndarray
+) -> tuple[np.ndarray, Optional[np.ndarray]]:
+    points = np.asarray(points)
+    if points.size == 0:
+        return points, None
+    if points.ndim != 2 or points.shape[1] < 3:
+        raise ValueError("points must have shape (N, D) with D >= 3")
+
+    coordinates_nm = points[:, :3].astype(np.float64, copy=False) * pitches
+    if not np.all(np.isfinite(coordinates_nm)):
+        raise ValueError("point coordinates must be finite")
+    return points, coordinates_nm
+
+
 def candidate_edge_lengths(
     bbox_span_nm: Sequence[float],
     voxel_size: Sequence[float],
@@ -289,12 +321,13 @@ def plan_gross_budgeting(
     a fixed-origin grid.
     """
 
-    budget = _validate_budget(budget)
-    pitches = _validate_voxel_size(voxel_size)
-    threshold, fraction = _validate_soma_parameters(
-        soma_threshold, sampling_fraction
+    budget, pitches, threshold, fraction = validate_gross_budgeting_parameters(
+        budget,
+        voxel_size,
+        soma_threshold=soma_threshold,
+        sampling_fraction=sampling_fraction,
     )
-    points = np.asarray(points)
+    points, coordinates_nm = _validate_points(points, pitches)
 
     if points.size == 0:
         edge = float(np.max(pitches))
@@ -310,12 +343,6 @@ def plan_gross_budgeting(
             quotas=np.empty(0, dtype=np.int64),
             candidate_edge_lengths_nm=np.array([edge], dtype=np.float64),
         )
-    if points.ndim != 2 or points.shape[1] < 3:
-        raise ValueError("points must have shape (N, D) with D >= 3")
-
-    coordinates_nm = points[:, :3].astype(np.float64, copy=False) * pitches
-    if not np.all(np.isfinite(coordinates_nm)):
-        raise ValueError("point coordinates must be finite")
     bbox_min_nm = np.min(coordinates_nm, axis=0)
     bbox_span_nm = np.max(coordinates_nm, axis=0) - bbox_min_nm
     candidates = candidate_edge_lengths(bbox_span_nm, pitches)
@@ -395,6 +422,16 @@ def gross_budget_points(
     soma_threshold: float = DEFAULT_SOMA_THRESHOLD,
 ) -> np.ndarray:
     """Convenience wrapper that runs both ``gross_budgeting`` passes."""
+
+    budget, pitches, _, _ = validate_gross_budgeting_parameters(
+        budget,
+        voxel_size,
+        soma_threshold=soma_threshold,
+        sampling_fraction=sampling_fraction,
+    )
+    points, _ = _validate_points(points, pitches)
+    if len(points) <= budget:
+        return points.copy()
 
     plan = plan_gross_budgeting(
         points,

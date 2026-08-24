@@ -189,7 +189,9 @@ fraction must be valid finite values (`soma_threshold > 1`,
 `use_cache` still controls only the raw-cloud label LRU. The budgeted result is
 computed afresh on every call and is never cached, preserving stochastic draws.
 With `timing=True`, the existing timing dictionary gains `pass1_time` and
-`pass2_time`; the no-strategy timing shape is unchanged.
+`pass2_time`; the no-strategy timing shape is unchanged. When the stored cloud
+already fits within `budget`, all points are copied directly and `pass1_time`
+is `0.0` because no partition plan is needed.
 
 **mo-gen integration is a bypass, not a drop-in.** mo-gen currently applies its
 uniform `subsample_ratio` before checking the 4096-point limit. Feeding a

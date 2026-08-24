@@ -200,6 +200,17 @@ class TestBudgetedQuery(unittest.TestCase):
                 voxel_size=VOXEL_SIZE,
             )
             np.testing.assert_array_equal(all_points, raw)
+
+            timed_points, timing = query.get_points(
+                self.one_point_label,
+                timing=True,
+                budget=10,
+                strategy="gross_budgeting",
+                voxel_size=VOXEL_SIZE,
+            )
+            np.testing.assert_array_equal(timed_points, raw)
+            self.assertEqual(timing["pass1_time"], 0.0)
+            self.assertGreaterEqual(timing["pass2_time"], 0.0)
         finally:
             query.close()
 

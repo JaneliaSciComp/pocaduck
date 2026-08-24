@@ -32,6 +32,7 @@ from pocaduck.budgeting import (
     bin_coordinates_nm,
     plan_gross_budgeting,
     sample_budget_plan,
+    validate_gross_budgeting_parameters,
 )
 
 
@@ -124,6 +125,21 @@ def gross_budgeting_indices(
     soma_threshold: float,
     sampling_fraction: Optional[float],
 ) -> tuple[np.ndarray, dict]:
+    budget, _, _, _ = validate_gross_budgeting_parameters(
+        budget,
+        voxel_size,
+        soma_threshold=soma_threshold,
+        sampling_fraction=sampling_fraction,
+    )
+    if len(points) <= budget:
+        pass2_start = time.perf_counter()
+        selected_indices = np.arange(len(points), dtype=np.int64)
+        pass2_seconds = time.perf_counter() - pass2_start
+        return selected_indices, {
+            "pass1_seconds": 0.0,
+            "pass2_seconds": pass2_seconds,
+        }
+
     pass1_start = time.perf_counter()
     plan = plan_gross_budgeting(
         points,

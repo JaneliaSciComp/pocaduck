@@ -7,7 +7,6 @@ aggregating points across all blocks.
 
 import os
 import time
-from numbers import Integral
 from typing import Dict, List, Optional, Tuple, Union, Set
 import numpy as np
 import pandas as pd
@@ -18,6 +17,7 @@ from .budgeting import (
     DEFAULT_SOMA_THRESHOLD,
     plan_gross_budgeting,
     sample_budget_plan,
+    validate_gross_budgeting_parameters,
 )
 from .storage_config import StorageConfig
 
@@ -306,12 +306,12 @@ class Query:
                 raise ValueError(f"unknown point budgeting strategy: {strategy!r}")
             if voxel_size is None:
                 raise ValueError("voxel_size is required for gross_budgeting")
-            if (
-                isinstance(budget, (bool, np.bool_))
-                or not isinstance(budget, Integral)
-                or budget <= 0
-            ):
-                raise ValueError("budget must be a positive integer")
+            budget, _, _, _ = validate_gross_budgeting_parameters(
+                budget,
+                voxel_size,
+                soma_threshold=soma_threshold,
+                sampling_fraction=sampling_fraction,
+            )
 
             budgeted_start = time.time()
             if timing:
@@ -321,18 +321,23 @@ class Query:
             else:
                 raw_points = self.get_points(label, use_cache, False)
 
-            pass1_start = time.perf_counter()
-            plan = plan_gross_budgeting(
-                raw_points,
-                int(budget),
-                voxel_size,
-                soma_threshold=soma_threshold,
-                sampling_fraction=sampling_fraction,
-            )
-            pass1_time = time.perf_counter() - pass1_start
+            if len(raw_points) <= budget:
+                pass1_time = 0.0
+                pass2_start = time.perf_counter()
+                points = raw_points.copy()
+            else:
+                pass1_start = time.perf_counter()
+                plan = plan_gross_budgeting(
+                    raw_points,
+                    budget,
+                    voxel_size,
+                    soma_threshold=soma_threshold,
+                    sampling_fraction=sampling_fraction,
+                )
+                pass1_time = time.perf_counter() - pass1_start
 
-            pass2_start = time.perf_counter()
-            points = sample_budget_plan(raw_points, plan, seed=seed)
+                pass2_start = time.perf_counter()
+                points = sample_budget_plan(raw_points, plan, seed=seed)
             pass2_time = time.perf_counter() - pass2_start
 
             if not timing:

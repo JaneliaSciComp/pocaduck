@@ -3,6 +3,7 @@
 import contextlib
 import io
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -59,6 +60,23 @@ class TestGrossBudgetingBenchmark(unittest.TestCase):
             np.testing.assert_array_equal(
                 case.points[:, 4].astype(bool), case.soma_mask
             )
+
+    def test_new_path_compute_shortcuts_an_all_points_result(self):
+        points = np.arange(20, dtype=np.int64).reshape(5, 4)
+
+        with mock.patch.object(benchmark, "plan_gross_budgeting") as planner:
+            selected, timings = benchmark.gross_budgeting_indices(
+                points,
+                budget=5,
+                voxel_size=(1, 1, 1),
+                seed=0,
+                soma_threshold=8.0,
+                sampling_fraction=None,
+            )
+
+        planner.assert_not_called()
+        np.testing.assert_array_equal(selected, np.arange(5))
+        self.assertEqual(timings["pass1_seconds"], 0.0)
 
     def test_coverage_proxy_uses_nm_partition_sweep(self):
         raw = np.array([[0, 0, 0], [10, 0, 0], [20, 0, 0]])

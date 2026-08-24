@@ -1,6 +1,7 @@
 """Synthetic contract tests for the pure gross-budgeting allocator."""
 
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -119,6 +120,26 @@ class TestGrossBudgeting(unittest.TestCase):
 
         all_points = gross_budget_points(points[:31], 100, VOXEL_SIZE, seed=1)
         np.testing.assert_array_equal(all_points, points[:31])
+
+    def test_all_points_shortcut_skips_planner_after_validation(self):
+        points = np.arange(20, dtype=np.int64).reshape(5, 4)
+
+        with mock.patch("pocaduck.budgeting.plan_gross_budgeting") as planner:
+            selected = gross_budget_points(points, 5, VOXEL_SIZE, seed=1)
+
+        planner.assert_not_called()
+        np.testing.assert_array_equal(selected, points)
+        self.assertIsNot(selected, points)
+
+        invalid_calls = [
+            lambda: gross_budget_points(points, 0, VOXEL_SIZE),
+            lambda: gross_budget_points(points, 10, (4, 4)),
+            lambda: gross_budget_points(points, 10, VOXEL_SIZE, soma_threshold=1),
+            lambda: gross_budget_points(np.zeros((2, 2)), 10, VOXEL_SIZE),
+        ]
+        for invalid_call in invalid_calls:
+            with self.subTest(call=invalid_call), self.assertRaises(ValueError):
+                invalid_call()
 
     def test_all_soma_relaxes_cap_and_no_soma_stays_uncapped(self):
         row_ids = np.arange(300, dtype=np.int64)
