@@ -178,7 +178,9 @@ reproduces the per-partition draw. All columns are selected by row index, so
 supervoxel IDs and arbitrary additional columns stay aligned.
 
 Soma detection defaults to `soma_threshold=8.0`, meaning eight times the median
-occupied-partition count. If the nps ingest rate is known,
+occupied-partition count. This conservative default was selected from the
+synthetic known-soma fixture matrix and remains caller-configurable for real
+store calibration. If the nps ingest rate is known,
 `sampling_fraction=...` enables the absolute occupancy form; the threshold's
 reciprocal is then the estimated partition-fill cutoff. The threshold and
 fraction must be valid finite values (`soma_threshold > 1`,
@@ -197,6 +199,32 @@ is below 4096. Adopters must bypass both downstream thinning stages (the uniform
 subsample and the r_k³ kNN draw), or request a correspondingly larger upstream
 budget. See [`examples/gross_budgeting.py`](examples/gross_budgeting.py) for a
 generated-store example using mo-gen's construct/query-once/close lifecycle.
+
+#### Benchmarking old and new retrieval
+
+`benchmark_gross_budgeting.py` runs synthetic fixtures by default. Its default
+cohort contains three labels in each of the ~10³, ~10⁵, and ~10⁶ point classes
+and five seeds. It compares both mo-gen subsample ratios, reports distributions
+for compute-only and end-to-end timings, separates fresh-Query and warm-LRU
+states, and sweeps stored-sample coverage, known-mask soma share, spatial recall,
+and draw overlap:
+
+```bash
+# Synthetic benchmark (the full default matrix)
+python benchmark_gross_budgeting.py
+
+# Later, against an accessible real store
+python benchmark_gross_budgeting.py \
+  --store-path /path/to/pocaduck/store \
+  --labels 123,456,789 \
+  --voxel-size 16,16,40 \
+  --output gross-budgeting-results.json
+```
+
+The faithful old-path r_k³ baseline lazily imports scikit-learn. Install it in
+the benchmark environment when running clouds that reach the density stage; it
+is intentionally not a PoCADuck runtime dependency. Real-store soma shares are
+labeled detector-relative because no independent soma ground truth is stored.
 
 ## Architecture
 

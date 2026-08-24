@@ -147,6 +147,44 @@ def bin_coordinates_nm(
     return bin_indices, grid_shape
 
 
+def _occupied_bin_count(bin_indices: np.ndarray, grid_shape: np.ndarray) -> int:
+    """Count occupied cells using compact linear ids when they fit in int64."""
+
+    cell_count = int(grid_shape[0]) * int(grid_shape[1]) * int(grid_shape[2])
+    if cell_count <= np.iinfo(np.int64).max:
+        linear_ids = (
+            (bin_indices[:, 0] * grid_shape[1] + bin_indices[:, 1])
+            * grid_shape[2]
+            + bin_indices[:, 2]
+        )
+        return len(np.unique(linear_ids))
+    return len(np.unique(bin_indices, axis=0))
+
+
+def _occupied_bin_info(
+    bin_indices: np.ndarray, grid_shape: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return occupied bins, row-to-bin ids, and counts for the chosen grid."""
+
+    cell_count = int(grid_shape[0]) * int(grid_shape[1]) * int(grid_shape[2])
+    if cell_count <= np.iinfo(np.int64).max:
+        linear_ids = (
+            (bin_indices[:, 0] * grid_shape[1] + bin_indices[:, 1])
+            * grid_shape[2]
+            + bin_indices[:, 2]
+        )
+        occupied_linear, inverse, counts = np.unique(
+            linear_ids, return_inverse=True, return_counts=True
+        )
+        occupied_bins = np.column_stack(
+            np.unravel_index(occupied_linear, tuple(int(v) for v in grid_shape))
+        )
+        return occupied_bins, inverse, counts
+    return np.unique(
+        bin_indices, axis=0, return_inverse=True, return_counts=True
+    )
+
+
 def _water_fill(
     quotas: np.ndarray,
     capacities: np.ndarray,
@@ -286,22 +324,17 @@ def plan_gross_budgeting(
     target = min(budget, len(points))
     for edge in candidates:
         bins, grid_shape = bin_coordinates_nm(coordinates_nm, bbox_min_nm, edge)
-        occupied_bins, partition_ids, counts = np.unique(
-            bins, axis=0, return_inverse=True, return_counts=True
-        )
-        if len(occupied_bins) <= target:
-            selected = (
-                float(edge),
-                grid_shape,
-                occupied_bins,
-                partition_ids.astype(np.int64, copy=False),
-                counts.astype(np.int64, copy=False),
-            )
+        if _occupied_bin_count(bins, grid_shape) <= target:
+            selected = (float(edge), grid_shape)
 
     if selected is None:  # s_max is guaranteed feasible for every non-empty cloud.
         raise RuntimeError("candidate ladder contained no feasible partition size")
 
-    edge, grid_shape, occupied_bins, partition_ids, counts = selected
+    edge, grid_shape = selected
+    bins, _ = bin_coordinates_nm(coordinates_nm, bbox_min_nm, edge)
+    occupied_bins, partition_ids, counts = _occupied_bin_info(bins, grid_shape)
+    partition_ids = partition_ids.astype(np.int64, copy=False)
+    counts = counts.astype(np.int64, copy=False)
     soma_mask = _soma_partitions(
         counts, edge, pitches, threshold, fraction
     )
@@ -335,8 +368,14 @@ def sample_budget_plan(
 
     rng = np.random.default_rng(seed)
     selections = []
+    ordered_indices = np.argsort(plan.partition_ids, kind="stable")
+    boundaries = np.concatenate(
+        ([0], np.cumsum(plan.counts, dtype=np.int64))
+    )
     for partition_id, quota in enumerate(plan.quotas):
-        indices = np.flatnonzero(plan.partition_ids == partition_id)
+        indices = ordered_indices[
+            boundaries[partition_id] : boundaries[partition_id + 1]
+        ]
         quota = int(quota)
         if quota == len(indices):
             selections.append(indices)

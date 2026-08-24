@@ -78,6 +78,8 @@ query.get_points(
 - Quotas guarantee every stored-cloud-occupied partition at least one point,
   cap soma-like cells at the base quota while non-soma capacity remains, then
   relax the cap if necessary to return exactly N when N points are stored.
+- The default `soma_threshold=8.0` was selected conservatively from the
+  synthetic known-soma fixture matrix; keep it configurable for real stores.
 - `sampling_fraction` switches soma detection from the default relative form
   (count at least `soma_threshold` times the occupied-cell median) to the
   absolute estimated-fill form (at least `1 / soma_threshold` full).
@@ -90,6 +92,13 @@ current order is uniform subsampling followed by the 4096-point density check,
 so an upstream 4096-point result becomes 3686 at ratio 0.90 or 3072 at 0.75 and
 then skips density sampling. See `examples/gross_budgeting.py` for the
 construct-Query / one-get_points / close lifecycle and integration note.
+
+`benchmark_gross_budgeting.py` owns the old-vs-new measurement path. Its
+scikit-learn import must stay lazy and benchmark-only. The default synthetic
+cohort is 3 labels × 5 seeds in each ~10³/~10⁵/~10⁶ class; real runs require
+`--store-path`, `--labels`, and the correct voxel size. Keep compute-only,
+fresh-Query end-to-end, and warm-LRU counterfactual results separate, and call
+all preservation metrics stored-sample proxies.
 
 ## Environment
 
