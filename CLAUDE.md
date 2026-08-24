@@ -50,6 +50,47 @@ The library consists of three main classes:
    - `get_point_count(label)`: Gets total point count for a label
    - `get_points(label)`: Gets all 3D points for a label (aggregated)
 
+### Budgeted query contract
+
+`Query.get_points` retains its original positional parameters
+`(label, use_cache=True, timing=False)` and adds keyword-only parameters:
+
+```python
+query.get_points(
+    label,
+    budget=4096,
+    strategy="gross_budgeting",
+    voxel_size=(16, 16, 40),
+    seed=None,
+    sampling_fraction=None,
+    soma_threshold=8.0,
+)
+```
+
+- `budget=None, strategy=None` is the unchanged full-cloud path. Never make
+  4096 an API default; it is a consumer recommendation.
+- `budget` and `strategy` are an inseparable pair. `gross_budgeting` requires
+  three positive voxel pitches in nm. Invalid/missing parameters and unknown
+  strategies raise `ValueError`.
+- The allocator in `pocaduck/budgeting.py` scans the complete 1.25-ratio
+  candidate ladder, uses bbox-min-anchored float64 binning with upper-face
+  clamping, tests occupancy only, and chooses the smallest feasible edge.
+- Quotas guarantee every stored-cloud-occupied partition at least one point,
+  cap soma-like cells at the base quota while non-soma capacity remains, then
+  relax the cap if necessary to return exactly N when N points are stored.
+- `sampling_fraction` switches soma detection from the default relative form
+  (count at least `soma_threshold` times the occupied-cell median) to the
+  absolute estimated-fill form (at least `1 / soma_threshold` full).
+- `use_cache` applies only to the raw label cloud. Never add seeds, budgets, or
+  strategy results to the LRU: pass 2 must draw anew per call. Strategy timing
+  adds `pass1_time` and `pass2_time` to the existing dictionary.
+
+mo-gen adopters must bypass both existing downstream thinning stages. Its
+current order is uniform subsampling followed by the 4096-point density check,
+so an upstream 4096-point result becomes 3686 at ratio 0.90 or 3072 at 0.75 and
+then skips density sampling. See `examples/gross_budgeting.py` for the
+construct-Query / one-get_points / close lifecycle and integration note.
+
 ## Environment
 
 The project uses a conda environment with the following key dependencies:

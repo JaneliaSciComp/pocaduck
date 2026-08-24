@@ -146,6 +146,58 @@ time — instead, the optimizer dedupes once when it builds the optimized
 files. If you mix workflows or skip optimization on data with overlapping
 writes, expect those two code paths to return different row counts.
 
+#### Coverage-first budgeted retrieval
+
+`get_points` can derive an exact-size, coverage-first sample from the stored
+cloud with the `gross_budgeting` strategy:
+
+```python
+points = query.get_points(
+    12345,
+    budget=4096,
+    strategy="gross_budgeting",
+    voxel_size=(16, 16, 40),  # nm per voxel axis
+    seed=7,
+)
+```
+
+The new parameters are keyword-only; existing positional calls such as
+`get_points(label, use_cache, timing)` keep their original meaning. `budget`
+and `strategy` must be supplied together, and `voxel_size` is required because
+PoCADuck stores voxel coordinates without resolution metadata. A missing pair,
+an unknown strategy, a missing/invalid voxel size, or a non-positive budget
+raises `ValueError`. `budget=None, strategy=None` remains the default and
+returns the full stored cloud exactly as before.
+
+`gross_budgeting` builds an isotropic partition grid in nm, guarantees at least
+one selected point from every partition occupied by the stored cloud at the
+solved grid size, caps soma-like dense partitions while other capacity remains,
+and randomly fills each partition's quota. It returns exactly `budget` points
+when the stored cloud has enough points, otherwise all stored points. `seed`
+reproduces the per-partition draw. All columns are selected by row index, so
+supervoxel IDs and arbitrary additional columns stay aligned.
+
+Soma detection defaults to `soma_threshold=8.0`, meaning eight times the median
+occupied-partition count. If the nps ingest rate is known,
+`sampling_fraction=...` enables the absolute occupancy form; the threshold's
+reciprocal is then the estimated partition-fill cutoff. The threshold and
+fraction must be valid finite values (`soma_threshold > 1`,
+`0 < sampling_fraction <= 1`).
+
+`use_cache` still controls only the raw-cloud label LRU. The budgeted result is
+computed afresh on every call and is never cached, preserving stochastic draws.
+With `timing=True`, the existing timing dictionary gains `pass1_time` and
+`pass2_time`; the no-strategy timing shape is unchanged.
+
+**mo-gen integration is a bypass, not a drop-in.** mo-gen currently applies its
+uniform `subsample_ratio` before checking the 4096-point limit. Feeding a
+4096-point budgeted cloud into the unchanged path would reduce it to 3686 points
+at ratio 0.90 or 3072 at ratio 0.75, then skip density-aware sampling because it
+is below 4096. Adopters must bypass both downstream thinning stages (the uniform
+subsample and the r_k³ kNN draw), or request a correspondingly larger upstream
+budget. See [`examples/gross_budgeting.py`](examples/gross_budgeting.py) for a
+generated-store example using mo-gen's construct/query-once/close lifecycle.
+
 ## Architecture
 
 PoCADuck has two required stages and one optional one:

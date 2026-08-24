@@ -7,12 +7,18 @@ aggregating points across all blocks.
 
 import os
 import time
+from numbers import Integral
 from typing import Dict, List, Optional, Tuple, Union, Set
 import numpy as np
 import pandas as pd
 import duckdb
 from pathlib import Path
 
+from .budgeting import (
+    DEFAULT_SOMA_THRESHOLD,
+    plan_gross_budgeting,
+    sample_budget_plan,
+)
 from .storage_config import StorageConfig
 
 # Default thread count to use when os.cpu_count() fails
@@ -255,7 +261,19 @@ class Query:
         count = result[0] if result[0] is not None else 0
         return count, timing_info
     
-    def get_points(self, label: int, use_cache: bool = True, timing: bool = False) -> Union[np.ndarray, Tuple[np.ndarray, Dict]]:
+    def get_points(
+        self,
+        label: int,
+        use_cache: bool = True,
+        timing: bool = False,
+        *,
+        budget: Optional[int] = None,
+        strategy: Optional[str] = None,
+        voxel_size: Optional[Tuple[float, float, float]] = None,
+        seed: Optional[int] = None,
+        sampling_fraction: Optional[float] = None,
+        soma_threshold: float = DEFAULT_SOMA_THRESHOLD,
+    ) -> Union[np.ndarray, Tuple[np.ndarray, Dict]]:
         """
         Get all point data for a specific label.
 
@@ -265,12 +283,67 @@ class Query:
             label: The label to query for.
             use_cache: Whether to use the in-memory point cloud cache (if enabled).
             timing: If True, return timing information as second element of tuple.
+            budget: Maximum number of returned points. Must be provided together
+                    with ``strategy``.
+            strategy: Budgeting strategy. ``"gross_budgeting"`` is supported.
+            voxel_size: Three voxel pitches in nm, required for a strategy.
+            seed: Seed for the strategy's per-partition random draws.
+            sampling_fraction: Optional ingest sampling fraction, enabling the
+                               absolute soma-density form.
+            soma_threshold: Relative soma-density multiplier. With
+                            ``sampling_fraction``, its reciprocal is the absolute
+                            estimated partition-fill threshold.
 
         Returns:
             Numpy array containing all point data for the label. The shape is (N, D) where
             N is the number of points and D is the dimension of the point data.
             If timing=True, returns (points, timing_info) tuple.
         """
+        if (budget is None) != (strategy is None):
+            raise ValueError("strategy and budget must be provided together")
+        if strategy is not None:
+            if strategy != "gross_budgeting":
+                raise ValueError(f"unknown point budgeting strategy: {strategy!r}")
+            if voxel_size is None:
+                raise ValueError("voxel_size is required for gross_budgeting")
+            if (
+                isinstance(budget, (bool, np.bool_))
+                or not isinstance(budget, Integral)
+                or budget <= 0
+            ):
+                raise ValueError("budget must be a positive integer")
+
+            budgeted_start = time.time()
+            if timing:
+                raw_points, timing_info = self.get_points(
+                    label, use_cache, True
+                )
+            else:
+                raw_points = self.get_points(label, use_cache, False)
+
+            pass1_start = time.perf_counter()
+            plan = plan_gross_budgeting(
+                raw_points,
+                int(budget),
+                voxel_size,
+                soma_threshold=soma_threshold,
+                sampling_fraction=sampling_fraction,
+            )
+            pass1_time = time.perf_counter() - pass1_start
+
+            pass2_start = time.perf_counter()
+            points = sample_budget_plan(raw_points, plan, seed=seed)
+            pass2_time = time.perf_counter() - pass2_start
+
+            if not timing:
+                return points
+
+            timing_info['pass1_time'] = pass1_time
+            timing_info['pass2_time'] = pass2_time
+            timing_info['total_time'] = time.time() - budgeted_start
+            timing_info['points_returned'] = len(points)
+            return points, timing_info
+
         # Convert numpy.uint64 to int if necessary
         if isinstance(label, np.integer):
             label = int(label)
