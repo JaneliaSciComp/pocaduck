@@ -14,3 +14,4 @@ dependencies:
   - libgoogle-cloud-storage
   # Dev dependencies
   - pytest
+  - tqdm
