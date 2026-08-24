@@ -68,6 +68,16 @@ class TestGrossBudgetingBenchmark(unittest.TestCase):
         self.assertEqual(fine, 2 / 3)
         self.assertEqual(coarse, 1.0)
 
+    def test_coverage_proxy_keeps_raw_extent_for_selected_boundary(self):
+        raw = np.array([[0, 0, 0], [10, 0, 0], [20, 0, 0]])
+        selected = raw[[0, 1]]
+
+        coverage = benchmark.coverage_fraction(
+            raw, selected, (1, 1, 1), edge_nm=10
+        )
+
+        self.assertEqual(coverage, 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

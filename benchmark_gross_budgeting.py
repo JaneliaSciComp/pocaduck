@@ -330,8 +330,12 @@ def coverage_fraction(
     raw_nm = raw_xyz.astype(np.float64, copy=False) * voxel_size
     selected_nm = selected_xyz.astype(np.float64, copy=False) * voxel_size
     bbox_min = np.min(raw_nm, axis=0)
-    raw_bins, _ = bin_coordinates_nm(raw_nm, bbox_min, edge_nm)
-    selected_bins, _ = bin_coordinates_nm(selected_nm, bbox_min, edge_nm)
+    raw_bins, raw_grid_shape = bin_coordinates_nm(raw_nm, bbox_min, edge_nm)
+    # The subset must use the raw cloud's extent. Deriving a smaller extent
+    # from selected points would clamp a selected boundary point into a
+    # different cell than the identical point occupies in the raw cloud.
+    selected_bins = np.floor((selected_nm - bbox_min) / edge_nm).astype(np.int64)
+    np.clip(selected_bins, 0, raw_grid_shape - 1, out=selected_bins)
     raw_occupied = {tuple(row) for row in np.unique(raw_bins, axis=0)}
     selected_occupied = {tuple(row) for row in np.unique(selected_bins, axis=0)}
     return len(raw_occupied & selected_occupied) / len(raw_occupied)
