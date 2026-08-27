@@ -69,6 +69,28 @@ refutes it for this store/host. Optimization headroom exists (the scan
 re-bins all N points at every rung; early termination or a coarse-to-fine
 scan could cut T) but is a follow-up decision, not part of this slice.
 
+### Hardware-decoupling addendum (2026-08-26)
+
+To rule out the old host as the cause, the cohort's raw clouds were dumped
+to npz on emdata4 and the compute-only comparison re-run on a modern
+i9-13900K with the arrays in local memory (same selector functions, seeds,
+ratios, randomized order; per-label medians of 5 seeds; raw numbers in the
+orchestrating workspace at `tmp/cohort-local-compute-rerun.json`):
+
+| Points | gross | old 0.75 | old 0.90 | gross / old 0.75 |
+|---:|---:|---:|---:|---:|
+| 9,999 | 0.028 | 0.012 | 0.014 | 2.25× |
+| 74,322 | 0.173 | 0.095 | 0.111 | 1.82× |
+| 409,355 | 1.033 | 0.745 | 0.946 | 1.39× |
+| 2,155,124 | 10.354 | 7.935 | 10.522 | 1.30× |
+
+**The inversion persists on modern hardware — it is data-driven, not a
+host artifact.** The ratio declines with size (kNN scales worse than the
+linear ladder scan), reaching parity with the 0.90 reference config at the
+largest neuron but never beating 0.75. The 4,522-point label (not shown)
+is a structural outlier: the old path's subsample drops it below 4,096, so
+kNN is skipped entirely and the old path is just a uniform draw there.
+
 ## Stored-sample proxies
 
 Soma shares are **detector-relative** (the store has no soma ground truth;
