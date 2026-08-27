@@ -227,6 +227,9 @@ The faithful old-path r_k³ baseline lazily imports scikit-learn. Install it in
 the benchmark environment when running clouds that reach the density stage; it
 is intentionally not a PoCADuck runtime dependency. Real-store soma shares are
 labeled detector-relative because no independent soma ground truth is stored.
+Benchmark *results* are deliberately not kept in this repository — runs are
+tied to a specific store, cohort, host, and date, and are recorded in the
+project workspace that drives this work.
 
 ## Architecture
 
